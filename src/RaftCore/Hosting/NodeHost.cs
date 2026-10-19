@@ -103,7 +103,7 @@ public static class NodeHost
     {
         var builder = WebApplication.CreateBuilder(Options(args));
         if (settings != null) builder.Configuration.AddInMemoryCollection(settings);
-        builder.Logging.AddSimpleConsole(o => { o.IncludeScopes = true; o.SingleLine = true; o.TimestampFormat = "HH:mm:ss.fff "; });
+        builder.Logging.AddSimpleConsole(o => { o.IncludeScopes = false; o.SingleLine = true; o.TimestampFormat = "HH:mm:ss.fff "; });
         // Le RPC interne sono decine al secondo: i log Information di HttpClient renderebbero illeggibile l'output
         builder.Logging.AddFilter("System.Net.Http.HttpClient", LogLevel.Warning);
         builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
@@ -123,12 +123,23 @@ public static class NodeHost
             if (File.Exists(config.NodeIdFile)) config.NodeId = File.ReadAllText(config.NodeIdFile).Trim();
             else { config.NodeId = Guid.NewGuid().ToString("D"); File.WriteAllText(config.NodeIdFile, config.NodeId); }
         }
-        try { config.Validate(); }
+        try
+        {
+            config.Validate();
+            if (!builder.Environment.IsDevelopment() && config.ClusterSecret.StartsWith("dev-only-", StringComparison.OrdinalIgnoreCase))
+                throw new ConfigurationValidationException(new[] { "ClusterSecret di sviluppo (dev-only-...) non ammesso fuori dall'ambiente Development (REQ-SEC-1)." });
+        }
         catch (ConfigurationValidationException ex) { throw new NodeStartException(ExitCodes.Configuration, ex.Message, ex); }
 
         DataDirLock dataLock;
-        try { dataLock = DataDirLock.Acquire(config.Storage.DataDir); }
-        catch (IOException ex) { throw new NodeStartException(ExitCodes.DataDirInUse, ex.Message, ex); }
+        // nodo figlio del cluster di sviluppo: l'istanza della sessione precedente può impiegare un attimo a chiudersi
+        var lockDeadline = DateTime.UtcNow.AddSeconds(config.DevCluster.ParentPid > 0 ? 10 : 0);
+        while (true)
+        {
+            try { dataLock = DataDirLock.Acquire(config.Storage.DataDir); break; }
+            catch (IOException) when (DateTime.UtcNow < lockDeadline) { await Task.Delay(250, ct); }
+            catch (IOException ex) { throw new NodeStartException(ExitCodes.DataDirInUse, ex.Message, ex); }
+        }
 
         try
         {
@@ -164,6 +175,9 @@ public static class NodeHost
             builder.Services.AddHostedService(sp => sp.GetRequiredService<RaftNode>());
             builder.Services.AddSingleton<UdpDiscoveryService>();
             builder.Services.AddHostedService(sp => sp.GetRequiredService<UdpDiscoveryService>());
+            builder.Services.AddHttpClient("probe").ConfigureHttpClient(c => c.Timeout = Timeout.InfiniteTimeSpan);
+            builder.Services.AddSingleton<PeerProbeService>();
+            builder.Services.AddHostedService(sp => sp.GetRequiredService<PeerProbeService>());
             builder.Services.AddSingleton<ClientApi>();
             configure?.Invoke(builder.Services, config);
 
@@ -224,6 +238,11 @@ public static class NodeHost
         {
             var (status, resp) = n.HandleAppend(r);
             return status == 200 ? Results.Json(resp) : Results.StatusCode(status);
+        });
+        app.MapPost(RpcAuth.HelloPath, (HelloRequest r, RaftNode n) =>
+        {
+            var (role, term) = n.GetRoleAndTerm();
+            return Results.Json(new HelloResponse { NodeId = n.SelfId, Url = n.SelfUrl, Role = role.ToString(), Term = term });
         });
         app.MapPost("/internal/v1/snapshot", (InstallSnapshotRequest r, RaftNode n) =>
         {

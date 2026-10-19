@@ -2,6 +2,38 @@
 
 Obiettivo: 3 istanze sulla stessa macchina, una scrittura, la caduta del Leader senza perdere dati.
 
+## Da Visual Studio: F5 avvia tutto il cluster
+
+1. Aprire `RaftCore.sln` e scegliere il profilo **Cluster 3 nodi (debug nodo 1)** (è il primo e il predefinito).
+2. Premere **F5**. Il processo in debug è il **nodo 1**; avvia da solo i nodi 2 e 3 come processi **non** in debug, ciascuno nella propria finestra console.
+3. **Shift+F5** (stop del debugger) chiude anche i nodi 2 e 3, entro circa un secondo.
+
+La configurazione è già pronta in `appsettings.Development.json`:
+- 3 membri;
+- porte `5001-5010`: ogni nodo prende la prima libera;
+- i nodi si trovano con la discovery a sondaggio su `127.0.0.1`;
+- dati in `src/RaftCore/devcluster/`;
+- `AllowEmptyState` attivo, solo in sviluppo;
+- segreto di sviluppo in `launchSettings.json`, rifiutato fuori da Development.
+
+Altri profili:
+
+| Profilo | Uso |
+| --- | --- |
+| Nodo singolo (ClusterSize 1) | Un solo nodo che è subito Leader: utile per provare l'API |
+| Solo nodo 1 / 2 / 3 | Un solo nodo, senza figli: per mettere in debug un nodo diverso dal primo. Si avviano gli altri a mano |
+
+Per seguire in debug anche un nodo figlio: **Debug → Connetti a processo** e scegliere `RaftCore.exe` con il titolo della finestra corrispondente.
+
+Prova rapida (PowerShell):
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:5002/api/v1/data -Headers @{"X-Request-ID"=[guid]::NewGuid()} -ContentType application/json -Body '{"a":1}'
+Invoke-RestMethod http://localhost:5001/api/v1/cluster/status
+```
+
+## Da riga di comando
+
 ## 1. Compilare
 
 ```bash

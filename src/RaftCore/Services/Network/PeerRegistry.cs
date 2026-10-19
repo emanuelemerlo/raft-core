@@ -21,6 +21,9 @@ public class PeerInfo
     public NodeRole Role { get; set; }
     public long Term { get; set; }
     public string? BestUrl => RpcUrl ?? UdpUrl ?? GossipUrl ?? StaticUrl;
+    /// <summary>RPC fallite consecutive verso BestUrl (connessione rifiutata, timeout).</summary>
+    public int ConsecutiveFailures { get; set; }
+    public bool Unreachable { get; set; }
 }
 
 public enum RegisterResult { Accepted, Replay }
@@ -36,10 +39,11 @@ public sealed class PeerRegistry
     private readonly Dictionary<string, PeerInfo> _peers = new();
     private readonly IClock _clock;
     private readonly int _timeoutMs;
+    private readonly int _unreachableAfter;
 
     public PeerRegistry(IClock clock, ClusterConfig cfg)
     {
-        _clock = clock; _timeoutMs = cfg.AnnounceTimeoutMs;
+        _clock = clock; _timeoutMs = cfg.AnnounceTimeoutMs; _unreachableAfter = Math.Max(1, cfg.Discovery.UnreachableAfterFailures);
         foreach (var kv in cfg.Peers)
         {
             var id = ClusterConfig.Norm(kv.Key);
@@ -65,7 +69,11 @@ public sealed class PeerRegistry
     public void NoteRpcUrl(string nodeId, string url)
     {
         if (string.IsNullOrWhiteSpace(url)) return;
-        lock (_l) Get(ClusterConfig.Norm(nodeId)).RpcUrl = Clean(url);
+        lock (_l)
+        {
+            var p = Get(ClusterConfig.Norm(nodeId));
+            p.RpcUrl = Clean(url); p.ConsecutiveFailures = 0; p.Unreachable = false;
+        }
     }
 
     /// <summary>URL propagati dal Leader: usati solo per i peer di cui non si conosce un URL diretto.</summary>
@@ -97,6 +105,38 @@ public sealed class PeerRegistry
         }
     }
 
+    /// <summary>Risposta valida e firmata dal peer atteso.</summary>
+    public void NoteSuccess(string nodeId)
+    {
+        lock (_l) if (_peers.TryGetValue(nodeId, out var p)) { p.ConsecutiveFailures = 0; p.Unreachable = false; }
+    }
+
+    /// <summary>
+    /// RPC fallita per errore di rete. Dopo UnreachableAfterFailures fallimenti il peer è irraggiungibile: gli URL appresi
+    /// (RPC, UDP, gossip) che hanno fallito vengono scartati, la discovery a sondaggio lo cerca su host e porte noti.
+    /// L'URL statico resta come ultima risorsa. Ritorna true se il peer è appena diventato irraggiungibile.
+    /// </summary>
+    public bool NoteFailure(string nodeId, string url)
+    {
+        var u = Clean(url);
+        lock (_l)
+        {
+            if (!_peers.TryGetValue(nodeId, out var p) || p.BestUrl != u) return false;
+            if (++p.ConsecutiveFailures < _unreachableAfter || p.Unreachable) return false;
+            p.Unreachable = true;
+            if (p.RpcUrl == u) p.RpcUrl = null;
+            if (p.UdpUrl == u) p.UdpUrl = null;
+            if (p.GossipUrl == u) p.GossipUrl = null;
+            return true;
+        }
+    }
+
+    /// <summary>Membri senza URL noto o irraggiungibili: la discovery a sondaggio li cerca.</summary>
+    public List<string> MissingOrUnreachable(IEnumerable<string> members)
+    {
+        lock (_l) return members.Where(m => !_peers.TryGetValue(m, out var p) || p.BestUrl == null || p.Unreachable).ToList();
+    }
+
     /// <summary>URL noto di un peer (anche non recente: serve a ritentare; la freschezza non è una condizione di quorum).</summary>
     public string? GetUrl(string nodeId)
     {
@@ -120,7 +160,7 @@ public sealed class PeerRegistry
             long now = _clock.MonotonicMs;
             return _peers.Values.Where(p => p.BestUrl != null).Select(p => new PeerInfo
             {
-                NodeId = p.NodeId, RpcUrl = p.RpcUrl, UdpUrl = now - p.UdpSeenMs <= _timeoutMs ? p.UdpUrl : null, StaticUrl = p.StaticUrl,
+                NodeId = p.NodeId, RpcUrl = p.RpcUrl, ConsecutiveFailures = p.ConsecutiveFailures, Unreachable = p.Unreachable, UdpUrl = now - p.UdpSeenMs <= _timeoutMs ? p.UdpUrl : null, StaticUrl = p.StaticUrl,
                 GossipUrl = p.GossipUrl, Role = p.Role, Term = p.Term, UdpSeenMs = p.UdpSeenMs
             }).ToList();
         }

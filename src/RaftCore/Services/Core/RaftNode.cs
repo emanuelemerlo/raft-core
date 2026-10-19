@@ -980,6 +980,7 @@ public sealed class RaftNode : BackgroundService
 
     public bool IsLeader { get { lock (_mu) return _role == NodeRole.Leader; } }
     public string SelfId => _self;
+    public string SelfUrl { get { lock (_mu) return _selfUrl; } }
 
     public (bool Ready, string Reason) GetReadiness()
     {

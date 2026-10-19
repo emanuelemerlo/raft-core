@@ -97,3 +97,14 @@ public class InstallSnapshotResponse
     public bool Success { get; set; }
     public long MatchIndex { get; set; }
 }
+
+/// <summary>Sondaggio della discovery: "chi risponde su questa porta?". Destinatario jolly, nessun effetto sullo stato.</summary>
+public class HelloRequest : BaseRpcRequest { }
+
+public class HelloResponse
+{
+    public string NodeId { get; set; } = string.Empty;
+    public string Url { get; set; } = string.Empty;
+    public string Role { get; set; } = string.Empty;
+    public long Term { get; set; }
+}

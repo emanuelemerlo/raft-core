@@ -25,6 +25,39 @@ public class StorageConfig
     public bool AllowEmptyState { get; set; } = false;
 }
 
+/// <summary>
+/// Sezione "Discovery": oltre agli annunci UDP, il nodo sonda gli host noti sulle porte di RestPorts finché trova tutti
+/// i membri, e ricomincia quando un membro smette di rispondere. Funziona anche senza broadcast e con porte dinamiche.
+/// </summary>
+public class DiscoveryConfig
+{
+    /// <summary>Host su cui cercare gli altri nodi; vuoto = 127.0.0.1. Si aggiungono automaticamente gli host di Peers.</summary>
+    public List<string> SeedHosts { get; set; } = new();
+    /// <summary>Porte da sondare; vuoto = le stesse di RestPorts/RestPort.</summary>
+    public string? ProbePorts { get; set; }
+    public bool ProbeEnabled { get; set; } = true;
+    public int ProbeIntervalMs { get; set; } = 2000;
+    /// <summary>Con tutti i membri raggiungibili si sonda solo ogni ProbeIdleIntervalMs.</summary>
+    public int ProbeIdleIntervalMs { get; set; } = 30000;
+    public int ProbeTimeoutMs { get; set; } = 500;
+    /// <summary>RPC fallite consecutive dopo le quali un membro è considerato irraggiungibile e viene cercato di nuovo.</summary>
+    public int UnreachableAfterFailures { get; set; } = 3;
+}
+
+/// <summary>
+/// Sezione "DevCluster" (solo ambiente Development): il processo avviato (es. con F5 in Visual Studio) diventa il primo
+/// nodo e lancia gli altri Members come processi figli non in debug, che terminano insieme a lui.
+/// </summary>
+public class DevClusterConfig
+{
+    /// <summary>Numero di nodi da avviare in totale (1 = solo questo processo).</summary>
+    public int Instances { get; set; } = 1;
+    /// <summary>Impostato dal launcher nei processi figli: PID del padre da sorvegliare.</summary>
+    public int ParentPid { get; set; }
+    /// <summary>Window (nuova finestra console, solo Windows), Prefix (output nel processo padre con prefisso) o File.</summary>
+    public string ChildOutput { get; set; } = "Auto";
+}
+
 /// <summary>Sezione "Log": segmentazione e compattazione del WAL (limita disco e RAM).</summary>
 public class LogConfig
 {
@@ -86,7 +119,12 @@ public class ClusterConfig
     public string? BaseDirectory { get; set; }
 
     public int RestPort { get; set; } = 5000;
-    /// <summary>Opzionale, es. "5000-5010": il nodo usa la prima porta libera dell'intervallo (prevale su RestPort).</summary>
+    /// <summary>
+    /// Opzionale: porte da provare in ordine, es. "5001-5005", "5001,5003,5007" o "5001-5005;5010;5012".
+    /// Il nodo usa la prima libera; gli altri nodi la trovano con la discovery a sondaggio (Discovery:SeedHosts). Prevale su RestPort.
+    /// </summary>
+    public string? RestPorts { get; set; }
+    /// <summary>Alias di RestPorts (v0.2.0).</summary>
     public string? RestPortRange { get; set; }
     /// <summary>URL pubblicato. Supporta {port}.</summary>
     public string? AdvertiseUrl { get; set; }
@@ -113,6 +151,8 @@ public class ClusterConfig
     public int ShutdownGraceMs { get; set; } = 5000;
     public int MaxConcurrentRequests { get; set; } = 256;
 
+    public DiscoveryConfig Discovery { get; set; } = new();
+    public DevClusterConfig DevCluster { get; set; } = new();
     public StorageConfig Storage { get; set; } = new();
     public LogConfig Log { get; set; } = new();
     public StateMachineConfig StateMachine { get; set; } = new();
@@ -142,15 +182,36 @@ public class ClusterConfig
         if (!string.IsNullOrEmpty(sql)) StateMachine.SqlServer.ConnectionString = sql;
     }
 
-    /// <summary>Intervallo di porte REST da provare, in ordine.</summary>
+    /// <summary>Porte REST da provare, in ordine (RestPorts, poi l'alias RestPortRange, poi RestPort).</summary>
     public IReadOnlyList<int> CandidatePorts()
     {
-        if (string.IsNullOrWhiteSpace(RestPortRange)) return new[] { RestPort };
-        var parts = RestPortRange.Split('-', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length == 2 && int.TryParse(parts[0], out var a) && int.TryParse(parts[1], out var b) && a >= 1 && b <= 65535 && a <= b)
-            return Enumerable.Range(a, b - a + 1).ToList();
-        if (parts.Length == 1 && int.TryParse(parts[0], out var single)) return new[] { single };
-        throw new ConfigurationValidationException(new[] { $"RestPortRange non valido: '{RestPortRange}' (atteso 'inizio-fine')." });
+        var spec = !string.IsNullOrWhiteSpace(RestPorts) ? RestPorts : RestPortRange;
+        return string.IsNullOrWhiteSpace(spec) ? new[] { RestPort } : ParsePortSpec(spec!);
+    }
+
+    /// <summary>
+    /// Elenco di porte in formato intervallo ("5001-5005"), lista ("5001,5003,5007") o misto ("5001-5005;5010;5012"):
+    /// separatori ',' e ';', ordine conservato, duplicati ignorati.
+    /// </summary>
+    public static IReadOnlyList<int> ParsePortSpec(string spec)
+    {
+        var result = new List<int>();
+        var errors = new List<string>();
+        foreach (var raw in spec.Split(new[] { ',', ';' }, StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+        {
+            var bounds = raw.Split('-', StringSplitOptions.TrimEntries);
+            if (bounds.Length == 1 && int.TryParse(bounds[0], out var p) && p is >= 1 and <= 65535) { if (!result.Contains(p)) result.Add(p); }
+            else if (bounds.Length == 2 && int.TryParse(bounds[0], out var a) && int.TryParse(bounds[1], out var b) && a is >= 1 and <= 65535 && b is >= 1 and <= 65535 && a <= b)
+            {
+                if (b - a > 1000) errors.Add($"intervallo '{raw}' troppo ampio (massimo 1000 porte)");
+                else for (int x = a; x <= b; x++) if (!result.Contains(x)) result.Add(x);
+            }
+            else errors.Add($"elemento '{raw}' non valido");
+        }
+        if (result.Count == 0 && errors.Count == 0) errors.Add("nessuna porta");
+        if (errors.Count > 0)
+            throw new ConfigurationValidationException(new[] { $"Elenco di porte non valido '{spec}': {string.Join("; ", errors)}. Formati ammessi: 5001-5005, 5001,5003,5007 oppure 5001-5005;5010;5012." });
+        return result;
     }
 
     /// <summary>Sostituisce i segnaposto e risolve i percorsi relativi. Da chiamare dopo aver scelto la porta.</summary>
@@ -196,6 +257,11 @@ public class ClusterConfig
         if (MaxBodyBytes < 1 || MaxBodyBytes > MaxBodyBytesLimit) v.Add($"MaxBodyBytes deve essere tra 1 e {MaxBodyBytesLimit}.");
         if (MaxForwardHops < 1) v.Add("MaxForwardHops deve essere >= 1.");
         try { _ = CandidatePorts(); } catch (ConfigurationValidationException ex) { v.AddRange(ex.Violations); }
+        if (!string.IsNullOrWhiteSpace(Discovery.ProbePorts))
+            try { _ = ParsePortSpec(Discovery.ProbePorts!); } catch (ConfigurationValidationException ex) { v.AddRange(ex.Violations.Select(x => "Discovery:ProbePorts: " + x)); }
+        if (Discovery.ProbeIntervalMs < 200 || Discovery.ProbeIdleIntervalMs < Discovery.ProbeIntervalMs) v.Add("Discovery: ProbeIntervalMs >= 200 e ProbeIdleIntervalMs >= ProbeIntervalMs.");
+        if (Discovery.ProbeTimeoutMs < 50) v.Add("Discovery:ProbeTimeoutMs deve essere >= 50.");
+        if (DevCluster.Instances < 1 || DevCluster.Instances > 7) v.Add("DevCluster:Instances deve essere tra 1 e 7.");
 
         if (MembershipMode == MembershipMode.Static)
         {

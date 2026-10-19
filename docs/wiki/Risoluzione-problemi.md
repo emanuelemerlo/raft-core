@@ -5,16 +5,17 @@ Quasi sempre i nodi superstiti non conoscono i rispettivi indirizzi. Nei log com
 - Con più istanze sulla stessa macchina **Windows** il broadcast UDP può arrivare a una sola istanza: usare `UdpMode=Multicast` oppure `Peers`.
 - Dalla 0.2 il Leader propaga gli URL di tutti i membri negli heartbeat: basta che ogni nodo ne conosca uno all'avvio.
 - Controllare `GET /api/v1/cluster/status` → `peers` (campi `rpcUrl`, `udpUrl`, `gossipUrl`, `staticUrl`).
+- Con porte assegnate dinamicamente (`RestPorts`) i nodi si trovano con la discovery a sondaggio: `Discovery:SeedHosts` deve contenere gli host dei nodi (default solo `127.0.0.1`). La metrica `probeFound` conta i membri trovati così.
 - Ricordare che con 3 nodi ne servono **2** attivi: con un solo superstite nessuno può diventare Leader, per progetto.
 
 ### Il nodo non parte: "stato persistente assente ... AllowEmptyState=false"
-È il primo avvio, oppure la DataDir è cambiata (attenzione ai segnaposto `{port}` con `RestPortRange`). Al primo avvio impostare `Storage:AllowEmptyState=true`, poi rimuoverlo. Se il disco è stato perso, vedere [Operazioni](Operazioni) → sostituzione di un nodo.
+È il primo avvio, oppure la DataDir è cambiata (attenzione al segnaposto `{port}` con `RestPorts`: usare `{nodeId}`). Al primo avvio impostare `Storage:AllowEmptyState=true`, poi rimuoverlo. Se il disco è stato perso, vedere [Operazioni](Operazioni) → sostituzione di un nodo.
 
 ### Il nodo non parte: "La directory dati ... è già in uso" (codice 3)
 Un'altra istanza usa la stessa DataDir. Sulla stessa macchina ogni istanza deve avere una DataDir propria: il default `./data/{nodeId}` lo garantisce.
 
 ### Il nodo non parte: "Nessuna porta REST disponibile" (codice 4)
-Tutte le porte di `RestPortRange` sono occupate: ampliare l'intervallo.
+Tutte le porte di `RestPorts` sono occupate: aggiungere porte all'elenco (es. `5001-5010;5020-5030`).
 
 ### Le scritture restano in attesa e poi danno 504
 Il Leader non riesce a scrivere sul database. Controllare `GET /api/v1/cluster/status` sul Leader (`stateMachineHealthy`, `stateMachineError`) e le metriche `applyLag` e `applyTransientErrors`. Le richieste non vanno perse: ritentate con lo stesso ID, ricevono l'esito quando il database torna disponibile.

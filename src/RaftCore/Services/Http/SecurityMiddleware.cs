@@ -49,7 +49,7 @@ public sealed class SecurityMiddleware
             string sender = r.TryGetProperty("senderNodeId", out var d) ? d.GetString() ?? "" : "";
             string dest = r.TryGetProperty("destNodeId", out var f) ? f.GetString() ?? "" : "";
             string url = r.TryGetProperty("senderUrl", out var e) ? e.GetString() ?? "" : "";
-            if (ClusterConfig.Norm(sender) != node || ClusterConfig.Norm(dest) != _members.SelfId) { ctx.Response.StatusCode = 400; return; }
+            if (ClusterConfig.Norm(sender) != node || !RpcAuth.DestinationMatches(dest, _members.SelfId, ctx.Request.Path.Value)) { ctx.Response.StatusCode = 400; return; }
             if (cid != _cfg.ClusterId || size != _cfg.ClusterSize || mh != _members.Hash)
             {
                 _metrics.Inc("membersHashMismatch");

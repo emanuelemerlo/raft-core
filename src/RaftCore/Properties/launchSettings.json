@@ -1,12 +1,49 @@
 {
+  "$schema": "https://json.schemastore.org/launchsettings.json",
   "profiles": {
-    "RaftCore": {
+    "Cluster 3 nodi (debug nodo 1)": {
       "commandName": "Project",
-      "launchBrowser": true,
+      "launchBrowser": false,
       "environmentVariables": {
-        "ASPNETCORE_ENVIRONMENT": "Development"
-      },
-      "applicationUrl": "https://localhost:65405;http://localhost:65406"
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "CLUSTER_SECRET": "dev-only-secret-not-for-production-0123456789"
+      }
+    },
+    "Nodo singolo (ClusterSize 1)": {
+      "commandName": "Project",
+      "launchBrowser": false,
+      "commandLineArgs": "--RaftCluster:ClusterSize=1 --RaftCluster:Members:1= --RaftCluster:Members:2= --RaftCluster:DevCluster:Instances=1 --RaftCluster:ClusterId=dev-single --RaftCluster:Storage:DataDir=./devcluster/single/{nodeId}",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "CLUSTER_SECRET": "dev-only-secret-not-for-production-0123456789"
+      }
+    },
+    "Solo nodo 1": {
+      "commandName": "Project",
+      "launchBrowser": false,
+      "commandLineArgs": "--RaftCluster:DevCluster:Instances=1 --RaftCluster:NodeId=11111111-1111-1111-1111-111111111111",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "CLUSTER_SECRET": "dev-only-secret-not-for-production-0123456789"
+      }
+    },
+    "Solo nodo 2": {
+      "commandName": "Project",
+      "launchBrowser": false,
+      "commandLineArgs": "--RaftCluster:DevCluster:Instances=1 --RaftCluster:NodeId=22222222-2222-2222-2222-222222222222",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "CLUSTER_SECRET": "dev-only-secret-not-for-production-0123456789"
+      }
+    },
+    "Solo nodo 3": {
+      "commandName": "Project",
+      "launchBrowser": false,
+      "commandLineArgs": "--RaftCluster:DevCluster:Instances=1 --RaftCluster:NodeId=33333333-3333-3333-3333-333333333333",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "CLUSTER_SECRET": "dev-only-secret-not-for-production-0123456789"
+      }
     }
   }
 }
