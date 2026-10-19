@@ -26,6 +26,11 @@ Vedere [SQL Server](SQL-Server) → errori e poison entry.
 ### Una richiesta riceve 410 "expired"
 La richiesta era rimasta in sospeso oltre `MaxPendingAgeMinutes` (es. cluster rimasto a lungo senza quorum) e non è stata scritta di proposito. Se il dato è ancora valido, inviarlo con un nuovo `X-Request-ID`.
 
+### Dopo la caduta del Leader il nuovo Leader arriva in diversi secondi
+Nei log compaiono più `Ruolo Follower -> Candidate` con term crescenti prima di `eletto Leader`: sono voti contesi. Dalla versione successiva alla 0.2.0 il candidato non aspetta più il nodo spento in ogni round; su Windows questo era la causa principale. Se succede ancora:
+- verificare il carico della macchina e la metrica `electionCount`;
+- allargare la finestra casuale `ElectionTimeoutMaxMs - ElectionTimeoutMinMs`, che rende meno probabili due candidature simultanee.
+
 ### Elezioni frequenti senza guasti
 Verificare la latenza dei dischi (`walFsyncLatencyMaxUs`), il carico della CPU e la rete. Su macchine lente aumentare insieme i tempi, rispettando i vincoli: ad esempio heartbeat 500, elezione 2000-3600, lease 1500.
 

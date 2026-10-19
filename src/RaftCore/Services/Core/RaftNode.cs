@@ -383,8 +383,19 @@ public sealed class RaftNode : BackgroundService
             }
             tasks.Add((id, Task.Run(() => ask(new PeerEndpoint(id, url)))));
         }
+        // Si procede appena si raggiunge il quorum, senza attendere i membri lenti o spenti: su Windows una connessione verso
+        // una porta chiusa arriva al timeout invece di essere rifiutata subito, e attendere tutti allungava ogni round
+        // (PreVote + voto) fino a provocare candidature simultanee e voti contesi in serie dopo la caduta del Leader.
+        // Le risposte successive vengono comunque elaborate (term più alto osservato) dai task, che proseguono.
+        int needed = _cfg.Quorum - 1;
         var granted = new List<string>();
-        foreach (var (id, t) in tasks) { try { if (await t) granted.Add(id); } catch { } }
+        var pending = tasks.ToDictionary(x => (Task)x.t, x => x.id);
+        while (pending.Count > 0 && granted.Count < needed)
+        {
+            var done = await Task.WhenAny(pending.Keys);
+            var id = pending[done]; pending.Remove(done);
+            try { if (await (Task<bool>)done) granted.Add(id); } catch { }
+        }
         return granted;
     }
 

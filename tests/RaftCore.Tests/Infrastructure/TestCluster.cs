@@ -42,8 +42,12 @@ public sealed class NetworkFaults
     private readonly ConcurrentDictionary<(string From, string To), bool> _blocked = new();
     public void Block(string a, string b) { _blocked[(a, b)] = true; _blocked[(b, a)] = true; }
     public void Isolate(string node, IEnumerable<string> others) { foreach (var o in others) Block(node, o); }
-    public void HealAll() => _blocked.Clear();
+    public void HealAll() { _blocked.Clear(); _blackholes.Clear(); }
     public bool IsBlocked(string from, string to) => _blocked.ContainsKey((from, to));
+    private readonly ConcurrentDictionary<string, bool> _blackholes = new();
+    /// <summary>Le RPC verso il nodo restano appese fino al timeout (come una porta chiusa su Windows o un host spento).</summary>
+    public void Blackhole(string node) => _blackholes[node] = true;
+    public bool IsBlackholed(string to) => _blackholes.ContainsKey(to);
 }
 
 public sealed class FaultyTransport : IPeerTransport
@@ -54,6 +58,7 @@ public sealed class FaultyTransport : IPeerTransport
     public FaultyTransport(IPeerTransport inner, NetworkFaults faults, string self) { _inner = inner; _faults = faults; _self = self; }
     public async Task<RpcResult<TResp>> SendAsync<TReq, TResp>(PeerEndpoint peer, string path, TReq request, TimeSpan timeout, CancellationToken ct) where TReq : BaseRpcRequest
     {
+        if (_faults.IsBlackholed(peer.NodeId)) { await Task.Delay(timeout, ct); return new RpcResult<TResp>(0, default); }
         if (_faults.IsBlocked(_self, peer.NodeId)) { await Task.Delay(Math.Min(50, (int)timeout.TotalMilliseconds), ct); return new RpcResult<TResp>(0, default); }
         return await _inner.SendAsync<TReq, TResp>(peer, path, request, timeout, ct);
     }

@@ -54,6 +54,8 @@ Il cluster NON DEVE fermarsi per una singola voce.
 
 **REQ-OPS-6 (piattaforme).** Il servizio DEVE essere eseguibile come processo console, Windows Service e unità systemd (`Type=notify`). I percorsi relativi sono risolti rispetto a `BaseDirectory`, alla directory dell'eseguibile (servizio) o alla directory corrente.
 
+**REQ-VOT-7 (quorum senza attese).** PreVote e RequestVote DEVONO concludere il round appena è raggiunto il quorum, senza attendere i membri che non rispondono; le risposte tardive DEVONO comunque essere elaborate (term più alto). Un membro spento non deve allungare i round di elezione oltre il necessario.
+
 **REQ-OPS-7 (thread pool).** All'avvio il nodo DEVE impostare un minimo di thread del pool adeguato, perché fsync e lock sincroni non introducano pause tali da far scadere il lease.
 
 ## Matrice dei test: aggiunte
@@ -72,6 +74,7 @@ Il cluster NON DEVE fermarsi per una singola voce.
 | T54 | Tre nodi su un elenco di porte, senza Peers né UDP | Si trovano tramite sondaggio; Leader eletto |
 | T55 | Nodo riavviato su un'altra porta (la sua è occupata) | Gli altri lo ritrovano; il nodo si riallinea e inoltra al Leader |
 | T56 | Un solo avvio in Development con `DevCluster:Instances=3` | Tre nodi attivi; uccidendo il padre i figli terminano |
+| T57 | RPC verso il Leader spento appese fino al timeout | Nuovo Leader in meno di 3 s, ripetuto in 3 failover consecutivi |
 
 ## Fuori ambito (invariato salvo dove indicato)
 
