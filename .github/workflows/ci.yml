@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build e test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
+    env:
+      DOTNET_NOLOGO: true
+      DOTNET_CLI_TELEMETRY_OPTOUT: true
+      RAFTCORE_TEST_LOGS: ${{ github.workspace }}/test-logs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Restore
+        run: dotnet restore RaftCore.sln
+      - name: Build
+        run: dotnet build RaftCore.sln -c Release --no-restore
+      - name: Test (unit, cluster, E2E)
+        run: dotnet test RaftCore.sln -c Release --no-build --filter "Category!=SqlServer" --logger "trx;LogFileName=results.trx" --logger "console;verbosity=normal"
+      - name: Log dei nodi (solo in caso di errore)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-${{ matrix.os }}
+          path: |
+            test-logs/
+            **/TestResults/*.trx
+          if-no-files-found: ignore
+
+  sqlserver:
+    name: Test di integrazione SQL Server
+    runs-on: ubuntu-latest
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "RaftCore!Test123"
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'RaftCore!Test123' -Q 'SELECT 1' || exit 1"
+          --health-interval 10s --health-timeout 5s --health-retries 15
+    env:
+      RAFT_TEST_SQL: "Server=localhost,1433;User Id=sa;Password=RaftCore!Test123;TrustServerCertificate=True;Encrypt=False"
+      RAFTCORE_TEST_LOGS: ${{ github.workspace }}/test-logs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Test SQL Server
+        run: dotnet test RaftCore.sln -c Release --filter "Category=SqlServer" --logger "console;verbosity=normal"
+      - name: Log dei nodi (solo in caso di errore)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-sqlserver
+          path: test-logs/
+          if-no-files-found: ignore

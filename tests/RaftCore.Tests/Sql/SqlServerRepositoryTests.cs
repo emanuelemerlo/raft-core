@@ -108,3 +108,42 @@ public sealed class SqlServerRepositoryTests : IAsyncLifetime
         }
     }
 }
+
+/// <summary>Cluster di 3 nodi su SQL Server condiviso: caduta del Leader sotto carico, nessuna perdita né duplicazione.</summary>
+[Trait("Category", "SqlServer")]
+public sealed class SqlServerClusterTests
+{
+    private static readonly string? Conn = Environment.GetEnvironmentVariable("RAFT_TEST_SQL");
+
+    [SkippableFact]
+    public async Task Leader_stop_under_load_with_shared_sql_server()
+    {
+        Skip.If(Conn == null, "RAFT_TEST_SQL non impostata");
+        var schema = "c" + Guid.NewGuid().ToString("N")[..10];
+        await using var c = TestCluster.Create(3);
+        c.Extra["RaftCluster:StateMachine:Provider"] = "SqlServer";
+        c.Extra["RaftCluster:StateMachine:SqlServer:ConnectionString"] = Conn;
+        c.Extra["RaftCluster:StateMachine:SqlServer:Schema"] = schema;
+        c.Extra["RaftCluster:StateMachine:SqlServer:DataTable"] = schema + ".IngestedData";
+        await c.StartAllAsync();
+        int l = await c.WaitForLeaderAsync(TimeSpan.FromSeconds(30));
+        int entry = c.Running.First(i => i != l);
+        var ids = Enumerable.Range(0, 60).Select(_ => Guid.NewGuid().ToString()).ToList();
+        var tasks = new List<Task<(int Status, string Body, HttpResponseMessage Resp)>>();
+        for (int k = 0; k < ids.Count; k++)
+        {
+            tasks.Add(c.PostAsync(entry, ids[k], $"{{\"k\":{k}}}"));
+            if (k == 20) _ = c.StopAsync(l);
+            await Task.Delay(30);
+        }
+        var res = await Task.WhenAll(tasks);
+        for (int k = 0; k < ids.Count; k++)
+            for (int a = 0; res[k].Status != 200 && a < 5; a++) res[k] = await c.PostAsync(entry, ids[k], $"{{\"k\":{k}}}");
+        Assert.All(res, r => Assert.Equal(200, r.Status));
+        await using var conn = new SqlConnection(Conn); await conn.OpenAsync();
+        var count = Convert.ToInt64(await new SqlCommand($"SELECT COUNT(*) FROM [{schema}].[IngestedData]", conn).ExecuteScalarAsync());
+        var distinct = Convert.ToInt64(await new SqlCommand($"SELECT COUNT(DISTINCT RequestId) FROM [{schema}].[IngestedData]", conn).ExecuteScalarAsync());
+        Assert.Equal(60, count);
+        Assert.Equal(60, distinct);
+    }
+}

@@ -169,6 +169,9 @@ public class ClusterConfig
     /// <summary>REQ-CFG-1: valida tutti i vincoli; se uno è violato il nodo NON deve partire.</summary>
     public void Validate()
     {
+        // gli override (variabili d'ambiente, riga di comando) non possono accorciare un array: le voci vuote si ignorano
+        Members = Members.Where(m => !string.IsNullOrWhiteSpace(m)).ToList();
+        foreach (var k in Peers.Where(kv => string.IsNullOrWhiteSpace(kv.Value)).Select(kv => kv.Key).ToList()) Peers.Remove(k);
         var v = new List<string>();
         if (string.IsNullOrWhiteSpace(ClusterId)) v.Add("ClusterId è obbligatorio.");
         if (ClusterSize < 1 || ClusterSize > 7) v.Add($"1 <= ClusterSize <= 7 (valore: {ClusterSize}).");

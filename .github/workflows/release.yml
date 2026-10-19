@@ -1,0 +1,130 @@
+name: Release
+
+# Crea una release quando viene pubblicato un tag vX.Y.Z (es. git tag v0.2.0 && git push origin v0.2.0).
+# Le note di rilascio sono la sezione corrispondente di CHANGELOG.md.
+on:
+  push:
+    tags: [ 'v*.*.*' ]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Versione da costruire senza pubblicare (es. 0.2.0-test)'
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      publish: ${{ steps.v.outputs.publish }}
+    steps:
+      - id: v
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"; echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"; echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: 8.0.x }
+      - run: dotnet test RaftCore.sln -c Release --filter "Category!=SqlServer"
+
+  build:
+    name: Pacchetto ${{ matrix.rid }}
+    needs: [ version, test ]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - { rid: win-x64,     os: windows-latest, archive: zip }
+          - { rid: linux-x64,   os: ubuntu-latest,  archive: tar }
+          - { rid: linux-arm64, os: ubuntu-latest,  archive: tar }
+          - { rid: osx-arm64,   os: macos-latest,   archive: tar }
+          - { rid: osx-x64,     os: macos-latest,   archive: tar }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: 8.0.x }
+      - name: Publish (self-contained, file singolo)
+        shell: bash
+        run: |
+          dotnet publish src/RaftCore/RaftCore.csproj -c Release -r ${{ matrix.rid }} --self-contained true \
+            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true \
+            -p:Version=${{ needs.version.outputs.version }} -o out/raftcore
+          cp README.md CHANGELOG.md out/raftcore/
+          mkdir -p out/raftcore/deploy && cp -r deploy/config deploy/systemd deploy/windows deploy/macos out/raftcore/deploy/
+      - name: Archivio
+        shell: bash
+        run: |
+          name=raftcore-${{ needs.version.outputs.version }}-${{ matrix.rid }}
+          cd out
+          if [ "${{ matrix.archive }}" = "zip" ]; then 7z a -tzip ../$name.zip raftcore > /dev/null; else tar czf ../$name.tar.gz raftcore; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-${{ matrix.rid }}
+          path: raftcore-*.*
+
+  docker:
+    name: Immagine container
+    needs: [ version, test ]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: needs.version.outputs.publish == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Nome immagine
+        id: img
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: VERSION=${{ needs.version.outputs.version }}
+          push: ${{ needs.version.outputs.publish == 'true' }}
+          tags: |
+            ${{ steps.img.outputs.name }}:${{ needs.version.outputs.version }}
+            ${{ steps.img.outputs.name }}:latest
+
+  release:
+    name: Pubblica la release
+    needs: [ version, build, docker ]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - name: Note di rilascio da CHANGELOG.md
+        run: |
+          v=${{ needs.version.outputs.version }}
+          awk -v v="$v" '$0 ~ "^## \\[" v "\\]" {f=1; next} /^## \[/ {if (f) exit} f' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then echo "Sezione [$v] mancante in CHANGELOG.md" >&2; exit 1; fi
+          (cd dist && sha256sum * > SHA256SUMS.txt)
+      - name: Crea la release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          v=${{ needs.version.outputs.version }}
+          pre=""; case "$v" in *-*) pre="--prerelease";; esac
+          gh release create "v$v" dist/* --title "RaftCore $v" --notes-file notes.md $pre

@@ -1,0 +1,29 @@
+# /etc/systemd/system/raftcore.service
+[Unit]
+Description=RaftCore - nodo del cluster ad alta affidabilità
+Wants=network-online.target
+After=network-online.target time-sync.target
+
+[Service]
+Type=notify
+User=raftcore
+Group=raftcore
+WorkingDirectory=/opt/raftcore
+ExecStart=/opt/raftcore/RaftCore
+# Segreti e parametri del nodo (CLUSTER_SECRET, RAFT_SQL_CONNECTION, RaftCluster__NodeId, ...)
+EnvironmentFile=/etc/raftcore/raftcore.env
+Environment=DOTNET_CONTENTROOT=/opt/raftcore
+Restart=on-failure
+RestartSec=5
+# Shutdown ordinato: ShutdownGraceMs + margine
+TimeoutStopSec=15
+LimitNOFILE=65536
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/raftcore
+
+[Install]
+WantedBy=multi-user.target

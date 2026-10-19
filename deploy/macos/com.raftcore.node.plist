@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- launchd (sviluppo su macOS): cp com.raftcore.node.plist ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/com.raftcore.node.plist -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.raftcore.node</string>
+  <key>ProgramArguments</key>
+  <array><string>/usr/local/raftcore/RaftCore</string></array>
+  <key>WorkingDirectory</key><string>/usr/local/raftcore</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CLUSTER_SECRET</key><string>sostituire-con-un-segreto-lungo</string>
+    <key>RaftCluster__NodeId</key><string>11111111-1111-1111-1111-111111111111</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/usr/local/raftcore/raftcore.log</string>
+  <key>StandardErrorPath</key><string>/usr/local/raftcore/raftcore.log</string>
+</dict>
+</plist>
