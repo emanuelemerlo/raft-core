@@ -18,6 +18,8 @@ public sealed class ProcessClusterTests : IDisposable
     private readonly TempDir _dir = new();
     private readonly List<(string Id, int Port, string Data)> _nodes = new();
     private readonly Process?[] _procs = new Process?[3];
+    private readonly List<StreamWriter> _logs = new();
+    private int _starts;
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(20) };
     private readonly string _cluster = "e2e-" + Guid.NewGuid().ToString("N")[..8];
 
@@ -48,9 +50,10 @@ public sealed class ProcessClusterTests : IDisposable
         foreach (var a in args) psi.ArgumentList.Add(a);
         psi.Environment["CLUSTER_SECRET"] = TestCluster.Secret;
         var p = Process.Start(psi)!;
-        var log = new StreamWriter(Path.Combine(_dir.Path, $"proc{i}.log")) { AutoFlush = true };
-        p.OutputDataReceived += (_, e) => { if (e.Data != null) lock (log) log.WriteLine(e.Data); };
-        p.ErrorDataReceived += (_, e) => { if (e.Data != null) lock (log) log.WriteLine(e.Data); };
+        var log = new StreamWriter(Path.Combine(_dir.Path, $"proc{i}-start{++_starts}.log")) { AutoFlush = true };
+        _logs.Add(log);
+        p.OutputDataReceived += (_, e) => { if (e.Data != null) lock (log) { try { log.WriteLine(e.Data); } catch (ObjectDisposedException) { } } };
+        p.ErrorDataReceived += (_, e) => { if (e.Data != null) lock (log) { try { log.WriteLine(e.Data); } catch (ObjectDisposedException) { } } };
         p.BeginOutputReadLine(); p.BeginErrorReadLine();
         _procs[i] = p;
     }
@@ -144,11 +147,12 @@ public sealed class ProcessClusterTests : IDisposable
     public void Dispose()
     {
         foreach (var p in _procs) { try { if (p != null && !p.HasExited) p.Kill(true); p?.WaitForExit(5000); } catch { } }
+        foreach (var l in _logs) { lock (l) { try { l.Dispose(); } catch { } } }
         var keep = Environment.GetEnvironmentVariable("RAFTCORE_TEST_LOGS");
         if (keep != null)
         {
             Directory.CreateDirectory(keep);
-            foreach (var f in Directory.GetFiles(_dir.Path, "proc*.log")) File.Copy(f, Path.Combine(keep, _cluster + "-" + Path.GetFileName(f)), true);
+            foreach (var f in Directory.GetFiles(_dir.Path, "proc*.log")) File.Copy(f, Path.Combine(keep, "Kill9_of_the_leader_fails_over_within_limits_without_loss_or_duplicates-" + Path.GetFileName(f)), true);
         }
         _http.Dispose();
         _dir.Dispose();

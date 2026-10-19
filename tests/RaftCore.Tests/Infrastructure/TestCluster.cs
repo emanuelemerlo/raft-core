@@ -105,9 +105,12 @@ public sealed class TestCluster : IAsyncDisposable
         ThreadPool.SetMinThreads(Math.Max(w, 64), Math.Max(io, 64));
     }
 
-    public static TestCluster Create(int n)
+    /// <summary>Nome del test (nome dei file di log copiati in RAFTCORE_TEST_LOGS).</summary>
+    public string TestName { get; private set; } = "";
+
+    public static TestCluster Create(int n, [System.Runtime.CompilerServices.CallerMemberName] string test = "")
     {
-        var c = new TestCluster();
+        var c = new TestCluster { TestName = test };
         for (int i = 0; i < n; i++)
         {
             var id = Guid.NewGuid().ToString("D");
@@ -262,7 +265,7 @@ public sealed class TestCluster : IAsyncDisposable
         if (keep != null)
         {
             Directory.CreateDirectory(keep);
-            foreach (var f in Directory.GetFiles(Dir.Path, "node*.log")) File.Copy(f, Path.Combine(keep, ClusterId + "-" + Path.GetFileName(f)), true);
+            foreach (var f in Directory.GetFiles(Dir.Path, "node*.log")) File.Copy(f, Path.Combine(keep, (TestName.Length > 0 ? TestName : ClusterId) + "-" + Path.GetFileName(f)), true);
         }
         Dir.Dispose();
     }
