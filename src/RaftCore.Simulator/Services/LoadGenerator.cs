@@ -90,6 +90,7 @@ public sealed class LoadGenerator : BackgroundService
     {
         if (!_running) return;
         _running = false;
+        lock (_l) _fault = null;
         _events.Info($"Invio ciclico fermato dopo {Interlocked.Read(ref _seq)} operazioni");
     }
 
@@ -117,8 +118,9 @@ public sealed class LoadGenerator : BackgroundService
     /// <summary>Dopo un guasto iniettato: misura il tempo fino al primo 200 di un'operazione iniziata dopo il guasto (REQ-FOV-1).</summary>
     public void MarkFault(string description)
     {
+        // Senza invio ciclico la misura non avrebbe senso: verrebbe chiusa dalla prima operazione inviata, anche minuti dopo
+        if (!_running) { _events.Info("Il tempo di failover si misura solo con l'invio ciclico attivo"); return; }
         lock (_l) _fault = new PendingFault(description, DateTimeOffset.Now);
-        if (!_running) _events.Info("Suggerimento: avviare l'invio ciclico per misurare il tempo di failover");
     }
 
     private sealed record PendingFault(string Description, DateTimeOffset At);
@@ -146,8 +148,8 @@ public sealed class LoadGenerator : BackgroundService
         var op = new OpRecord { Seq = seq, RequestId = Guid.NewGuid().ToString("D"), StartedAt = DateTimeOffset.Now };
         _ops[seq] = op;
         if (_ops.Count > 1_000_000 && _ops.TryRemove(_ops.Keys.Min(), out _)) { }
-        byte[] body = BuildPayload(op);                          // serializzato una sola volta: retry con gli stessi byte
         var settings = Settings;
+        byte[] body = BuildPayload(op, settings);               // serializzato una sola volta: retry con gli stessi byte
         Interlocked.Increment(ref _inFlight);
         var sw = Stopwatch.StartNew();
         try
@@ -174,8 +176,9 @@ public sealed class LoadGenerator : BackgroundService
                     op.FinalStatus = r.Status; op.Error = r.Error ?? r.Body;
                     lastNetErrPort = r.NetworkError ? node.Port : -1;
                 }
-                // backoff esponenziale con jitter (REQ-CLI-1), entro il budget complessivo dell'operazione
-                int backoff = (int)Math.Min(2000, 100 * Math.Pow(2, Math.Min(attempt, 5))) + Random.Shared.Next(0, 100);
+                // backoff esponenziale con jitter come nel Contratto client (200 ms, 400 ms, 800 ms… fino a 5 s),
+                // entro il budget complessivo dell'operazione
+                int backoff = (int)Math.Min(5000, 200 * Math.Pow(2, Math.Min(attempt, 5))) + Random.Shared.Next(0, 100);
                 if (sw.ElapsedMilliseconds + backoff > _opt.RetryBudgetMs) { op.Outcome = OpOutcome.Abbandonata; break; }
                 Interlocked.Increment(ref _cntRetries);
                 Count(4);
@@ -193,7 +196,7 @@ public sealed class LoadGenerator : BackgroundService
         return op;
     }
 
-    private byte[] BuildPayload(OpRecord op)
+    private byte[] BuildPayload(OpRecord op, GeneratorSettings settings)
     {
         using var ms = new MemoryStream();
         using (var w = new Utf8JsonWriter(ms))
@@ -203,7 +206,7 @@ public sealed class LoadGenerator : BackgroundService
             w.WriteString("timestamp", op.StartedAt);
             w.WriteString("source", _opt.Source);
             w.WriteString("runId", RunId);
-            if (Settings.PadBytes > 0) w.WriteString("pad", new string('x', Settings.PadBytes));
+            if (settings.PadBytes > 0) w.WriteString("pad", new string('x', settings.PadBytes));
             w.WriteEndObject();
         }
         return ms.ToArray();

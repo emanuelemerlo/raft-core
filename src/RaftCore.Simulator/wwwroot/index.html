@@ -261,10 +261,11 @@ function roleChip(nd) {
 function renderNodes() {
   const el = $('nodes');
   if (!state.nodes.length) {
-    el.innerHTML = `<div class="empty">Nessun nodo trovato su ${esc(state.scanned.length)} indirizzi.<br>Avviare il cluster da Visual Studio (profilo <b>Cluster 3 nodi</b> o il profilo multiplo <b>Cluster + Simulatore</b>).</div>`;
+    el.innerHTML = `<div class="empty">Nessun nodo trovato su ${esc(state.scanned.length)} indirizzi.<br>Avviare il cluster da Visual Studio (profilo <b>Cluster 3 nodi (debug nodo 1)</b> o il profilo multiplo <b>Cluster + Simulatore</b>).</div>`;
+    el.dataset.html = '';
     return;
   }
-  el.innerHTML = state.nodes.map(nd => {
+  const html = state.nodes.map(nd => {
     const leader = state.nodes.find(x => x.nodeId === nd.leaderId);
     return `<div class="node ${nd.reachable && nd.role === 'Leader' ? 'is-leader' : ''} ${nd.reachable ? '' : 'down'}">
       <div class="node-h"><b>${esc(nd.shortId)}</b>${nd.isDevParent ? '<span class="chip" title="Nodo 1, sotto debugger">debug</span>' : ''}<span class="spacer"></span>${roleChip(nd)}</div>
@@ -289,6 +290,9 @@ function renderNodes() {
       </div>
     </div>`;
   }).join('');
+  // Il DOM si rigenera solo se cambia qualcosa e mai con un pulsante premuto: sostituire il pulsante tra pointerdown e
+  // pointerup farebbe perdere il clic.
+  if (html !== el.dataset.html && !pointerDown) { el.innerHTML = html; el.dataset.html = html; }
 }
 
 $('nodes').addEventListener('click', async e => {
@@ -474,7 +478,10 @@ function renderEvents() {
   $('events').innerHTML = state.events.map(e => `<li class="${e.level}"><time>${fmtTime(e.time)}</time><span>${esc(e.text)}</span></li>`).join('');
 }
 
-let busy = false;
+let busy = false, pointerDown = false;
+document.addEventListener('pointerdown', () => pointerDown = true, true);
+document.addEventListener('pointerup', () => setTimeout(() => pointerDown = false, 0), true);
+document.addEventListener('pointercancel', () => pointerDown = false, true);
 async function refresh() {
   if (busy) return; busy = true;
   try {

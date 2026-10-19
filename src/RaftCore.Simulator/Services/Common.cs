@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Net;
 using System.Text;
 
 namespace RaftCore.Simulator.Services;
@@ -150,6 +149,9 @@ public sealed class DataClient
         return ex.InnerException?.Message ?? ex.Message;
     }
 
+    private static readonly System.Text.Json.JsonSerializerOptions RelaxedJson =
+        new() { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+
     /// <summary>JSON con caratteri non ASCII leggibili (il nodo li restituisce come \u00e0).</summary>
     private static string Readable(string text)
     {
@@ -157,17 +159,10 @@ public sealed class DataClient
         try
         {
             using var doc = System.Text.Json.JsonDocument.Parse(text);
-            return System.Text.Json.JsonSerializer.Serialize(doc.RootElement,
-                new System.Text.Json.JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
+            return System.Text.Json.JsonSerializer.Serialize(doc.RootElement, RelaxedJson);
         }
         catch (System.Text.Json.JsonException) { return text; }
     }
 
     public static string Truncate(string s, int max) => s.Length <= max ? s : s[..max] + "…";
-
-    public static string StatusText(int status) => status switch
-    {
-        0 => "errore di rete",
-        _ => $"{status} {(Enum.IsDefined(typeof(HttpStatusCode), status) ? ((HttpStatusCode)status).ToString() : "")}".Trim()
-    };
 }

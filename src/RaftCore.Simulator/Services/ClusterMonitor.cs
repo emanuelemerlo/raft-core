@@ -68,15 +68,22 @@ public sealed class ClusterMonitor : BackgroundService
         lock (_l)
         {
             var now = DateTime.UtcNow;
-            return _nodes.Values.OrderBy(n => n.IsDevParent ? 0 : 1).ThenBy(n => n.NodeId).Select(n =>
-            {
-                var c = n.Clone();
-                c.LastSeenAgoMs = (long)(now - n.LastSeenUtc).TotalMilliseconds;
-                c.Paused = n.Pid is int pid && _proc.IsPaused(pid);
-                c.CanRestart = !n.Reachable && n.Launch != null && !n.IsDevParent && !IsAlive(n.Pid) && (n.Launch.ParentPid is not int pp || IsAlive(pp));
-                return c;
-            }).ToList();
+            return _nodes.Values.Select(n => View(n, now)).OrderBy(n => n.IsDevParent ? 0 : 1).ThenBy(n => n.NodeId).ToList();
         }
+    }
+
+    /// <summary>Copia per l'esterno, con i campi derivati. Va chiamata sotto lock.</summary>
+    private NodeView View(NodeView n, DateTime now)
+    {
+        var c = n.Clone();
+        c.LastSeenAgoMs = (long)(now - n.LastSeenUtc).TotalMilliseconds;
+        c.Paused = n.Pid is int pid && _proc.IsPaused(pid);
+        // Il nodo 1 del cluster di sviluppo (F5, sotto debugger) è il processo indicato come DevCluster:ParentPid dagli
+        // altri nodi. Un nodo avviato da solo (profili "Solo nodo N" o riga di comando) non è padre di nessuno.
+        c.IsDevParent = n.Pid is int self && _nodes.Values.Any(o => !ReferenceEquals(o, n) && o.Launch?.ParentPid == self);
+        c.CanRestart = !n.Reachable && n.Launch != null && !c.IsDevParent && !IsAlive(n.Pid)
+                       && (n.Launch.ParentPid is not int parent || IsAlive(parent));
+        return c;
     }
 
     public IReadOnlyList<NodeView> Reachable() => Snapshot().Where(n => n.Reachable).OrderBy(n => n.Port).ToList();
@@ -87,7 +94,7 @@ public sealed class ClusterMonitor : BackgroundService
             return _nodes.Values.Where(n => n.Reachable && n.Role == "Leader").OrderByDescending(n => n.Term).FirstOrDefault()?.Clone();
     }
 
-    public NodeView? Find(string nodeId) { lock (_l) return _nodes.TryGetValue(nodeId, out var n) ? n.Clone() : null; }
+    public NodeView? Find(string nodeId) { lock (_l) return _nodes.TryGetValue(nodeId, out var n) ? View(n, DateTime.UtcNow) : null; }
 
     // ------------------------------------------------------------------ sondaggio
     protected override async Task ExecuteAsync(CancellationToken ct)
@@ -147,7 +154,7 @@ public sealed class ClusterMonitor : BackgroundService
             {
                 if (!_nodes.TryGetValue(n.NodeId, out var live)) continue;
                 live.Pid = pid;
-                if (info != null) { live.Launch = info; live.IsDevParent = info.IsDevParent; }
+                if (info != null) live.Launch = info;
             }
         }
     }
@@ -254,7 +261,7 @@ public sealed class ClusterMonitor : BackgroundService
         lock (_l)
         {
             if (!_nodes.TryGetValue(nodeId, out var live)) throw new SimulatorException($"Nodo {nodeId} sconosciuto");
-            n = live.Clone(); info = live.Launch;
+            n = View(live, DateTime.UtcNow); info = live.Launch;
         }
         if (n.Reachable || IsAlive(n.Pid)) throw new SimulatorException("Il nodo è ancora in esecuzione");
         if (n.IsDevParent) throw new SimulatorException("Il nodo 1 del cluster di sviluppo si riavvia dalla sessione di debug (F5)");
@@ -282,7 +289,7 @@ public sealed class ClusterMonitor : BackgroundService
             if (_nodes.TryGetValue(nodeId, out var live))
             {
                 live.Pid = p;
-                if (live.Launch == null && info != null) { live.Launch = info; live.IsDevParent = info.IsDevParent; }
+                if (live.Launch == null && info != null) live.Launch = info;
             }
         }
         return (n, p);

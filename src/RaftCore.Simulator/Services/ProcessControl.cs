@@ -9,8 +9,6 @@ namespace RaftCore.Simulator.Services;
 /// <summary>Come rilanciare un nodo: eseguibile, argomenti e directory di lavoro letti dal processo in esecuzione.</summary>
 public sealed record LaunchInfo(string Executable, string? ArgumentString, IReadOnlyList<string>? Arguments, string? WorkingDirectory)
 {
-    /// <summary>Il nodo 1 del cluster di sviluppo (quello sotto debugger) non ha DevCluster:ParentPid: è il padre degli altri.</summary>
-    public bool IsDevParent => !AllText.Contains("DevCluster:ParentPid=", StringComparison.OrdinalIgnoreCase);
     /// <summary>PID del nodo 1 sorvegliato da questo nodo figlio: se è terminato, il figlio rilanciato si chiuderebbe subito.</summary>
     public int? ParentPid
     {

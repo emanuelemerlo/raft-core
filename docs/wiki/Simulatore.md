@@ -21,7 +21,9 @@ La soluzione contiene il profilo di avvio multiplo **Cluster + Simulatore** (fil
 
 Il profilo **Cluster + Simulatore (simulatore senza debug)** è identico, ma lascia sotto debugger solo il nodo 1.
 
-I profili multipli richiedono Visual Studio 2022 **17.11** o successivo; nella 17.11 la funzione va abilitata tra le funzionalità in anteprima. Con versioni precedenti si usa *Soluzione → Configura progetti di avvio → Progetti di avvio multipli*:
+I profili multipli richiedono Visual Studio 2022 **17.11** o successivo, con la funzionalità in anteprima **Enable Multi-Project Launch Profiles** attiva (*Strumenti → Opzioni → Ambiente → Funzionalità in anteprima*). Se la funzionalità non è attiva, il menu non mostra **Cluster + Simulatore** e F5 avvia solo il progetto di avvio corrente, cioè il cluster senza simulatore.
+
+In alternativa, con qualsiasi versione: clic destro sulla soluzione → *Configura progetti di avvio* → *Progetti di avvio multipli*:
 
 - `RaftCore`: Avvia, profilo *Cluster 3 nodi (debug nodo 1)*;
 - `RaftCore.Simulator`: Avvia, profilo *Simulatore*.
@@ -43,7 +45,7 @@ cd src/RaftCore.Simulator && dotnet run --launch-profile Simulatore
 - stato di `/health/ready`;
 - PID del processo.
 
-Il nodo 1 ha il badge **debug**.
+Il nodo 1 avviato con il profilo *Cluster 3 nodi (debug nodo 1)* ha il badge **debug**: è il processo indicato come padre (`DevCluster:ParentPid`) dagli altri nodi. Un nodo avviato da solo (profili *Solo nodo N* o riga di comando) non lo ha.
 
 **Invio ciclico.** Ogni operazione invia un JSON del tipo:
 
@@ -63,7 +65,7 @@ Il simulatore si comporta come un client conforme al [Contratto client](Contratt
 
 - `X-Request-ID` generato una volta per operazione;
 - stessi byte del body a ogni ritento;
-- retry su errore di rete, 503 e 504 con backoff esponenziale e jitter, entro 60 s;
+- retry su errore di rete, 503 e 504 con backoff esponenziale e jitter (200 ms, 400 ms, 800 ms… fino a 5 s), entro 60 s;
 - mai retry su 4xx;
 - su errore di rete prova un altro nodo.
 
@@ -75,13 +77,13 @@ Contatori, latenze (p50/p95/max), grafico degli ultimi 120 s e tabella delle ult
 | --- | --- | --- |
 | **Kill** (di un nodo o del Leader) | Terminazione immediata del processo (TerminateProcess / SIGKILL), senza shutdown ordinato | T5, T6, T20 |
 | **Pausa** per N secondi | Processo congelato (NtSuspendProcess / SIGSTOP) e poi ripreso | T14 |
-| **Riavvia** | Rilancia un nodo terminato con la stessa riga di comando: si riallinea dal Leader | T11, T16 |
+| **Riavvia** | Rilancia un nodo terminato con la stessa riga di comando: si riallinea dal Leader | T21 |
 
 Dopo un guasto, con l'invio ciclico attivo, il simulatore misura il **tempo di failover**: dal guasto al primo `200` di un'operazione iniziata dopo il guasto (REQ-FOV-1). Il valore compare sotto il grafico e negli eventi.
 
-Il simulatore agisce solo su processi `RaftCore` individuati dalla porta in ascolto. Il **nodo 1** è il processo sotto debugger e il padre degli altri nodi, quindi:
+Il simulatore agisce solo su processi `RaftCore` individuati dalla porta in ascolto. Se Visual Studio è in esecuzione come amministratore e il simulatore no, Windows può negare l'accesso ai processi dei nodi: l'errore compare nell'interfaccia. Il **nodo 1** è il processo sotto debugger e il padre degli altri nodi, quindi:
 
-- se viene terminato, si chiudono anche i nodi 2 e 3 e il cluster si riavvia con F5;
+- se viene terminato, si chiudono anche i nodi 2 e 3, che non si possono riavviare dal simulatore: il cluster si riavvia con F5;
 - per provare il failover quando il Leader è il nodo 1 conviene usare la **pausa**, oppure aspettare che diventi Leader un altro nodo.
 
 ## Scenari
@@ -97,7 +99,6 @@ Ogni scenario si esegue con un clic (o *Esegui tutti*) e riporta l'esito atteso,
 | Senza `X-Request-ID` / ID non UUID / JSON non valido | 400 (T34) |
 | Body oltre `MaxBodyBytes` | 413, nessuna scrittura (T34) |
 | `X-Forward-Hops` e `X-Forwarded-By` inviati dal client | 200: header non firmati ignorati |
-| Body senza `Content-Type` | 200 |
 
 ## Verifica delle scritture
 
@@ -109,10 +110,14 @@ Ogni scenario si esegue con un clic (o *Esegui tutti*) e riporta l'esito atteso,
 - **ammesso** (REQ-API-3): operazioni abbandonate dal client ma scritte comunque;
 - totali per esito (applicate, deduplicate, rifiutate, scadute, in quarantena, no-op) e continuità degli indici del log.
 
-Con la state machine SQL Server la verifica va fatta sul database, ad esempio:
+Con la state machine SQL Server la verifica va fatta sul database. `RequestId` è già univoco in `raft.IngestedData`, quindi il controllo utile è sul `seq` della sessione (il `runId` è mostrato in alto nell'interfaccia):
 
 ```sql
-SELECT RequestId, COUNT(*) FROM raft.IngestedData GROUP BY RequestId HAVING COUNT(*) > 1
+SELECT JSON_VALUE(Payload, '$.seq') AS Seq, COUNT(*) AS N
+FROM raft.IngestedData
+WHERE JSON_VALUE(Payload, '$.runId') = '<runId>'
+GROUP BY JSON_VALUE(Payload, '$.seq')
+HAVING COUNT(*) > 1
 ```
 
 ## Configurazione
@@ -133,4 +138,4 @@ SELECT RequestId, COUNT(*) FROM raft.IngestedData GROUP BY RequestId HAVING COUN
 | `NodeWorkingDirectory` | `../RaftCore` | Directory di lavoro dei nodi riavviati (Windows) |
 | `NodeEnvironment` | — | Variabili ereditate dai nodi riavviati. In Development contiene `ASPNETCORE_ENVIRONMENT` e il segreto di sviluppo |
 
-API del simulatore, utili anche per script: `GET /sim/state`, `POST /sim/generator/start|stop|one|burst|reset`, `POST /sim/scenarios/{id}`, `POST /sim/nodes/{nodeId}/kill|pause|resume|restart`, `POST /sim/leader/kill|pause`, `POST /sim/verify`, `GET /sim/ops.csv`.
+API del simulatore, utili anche per script: `GET /sim/state`, `POST /sim/generator/start|stop|settings|one|burst|reset`, `POST /sim/scenarios/{id}`, `POST /sim/nodes/{nodeId}/kill|pause|resume|restart`, `POST /sim/leader/kill|pause`, `POST /sim/verify`, `GET /sim/ops.csv`.

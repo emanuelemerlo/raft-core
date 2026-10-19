@@ -22,7 +22,8 @@ var app = builder.Build();
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
-// Errori di dominio (nodo sconosciuto, PID non trovato, ...) come 409 con un messaggio leggibile dall'interfaccia
+// Errori come JSON con un messaggio leggibile dall'interfaccia: 409 per quelli di dominio (nodo sconosciuto, PID non
+// trovato, ...), 500 per gli altri (es. accesso negato a un processo avviato da un Visual Studio in esecuzione come amministratore)
 app.Use(async (ctx, next) =>
 {
     try { await next(); }
@@ -30,6 +31,12 @@ app.Use(async (ctx, next) =>
     {
         ctx.Response.StatusCode = 409;
         await ctx.Response.WriteAsJsonAsync(new { error = ex.Message });
+    }
+    catch (Exception ex) when (!ctx.Response.HasStarted && !ctx.RequestAborted.IsCancellationRequested)
+    {
+        app.Logger.LogError(ex, "Errore in {Path}", ctx.Request.Path);
+        ctx.Response.StatusCode = 500;
+        await ctx.Response.WriteAsJsonAsync(new { error = $"{ex.GetType().Name}: {ex.Message}" });
     }
 });
 
@@ -89,11 +96,8 @@ api.MapPost("/leader/{action}", (string action, int? seconds, ClusterMonitor m, 
 });
 
 // ---- verifica delle scritture
-api.MapPost("/verify", async (AppliedLogVerifier v, LoadGenerator g, ClusterMonitor m, EventLog e, CancellationToken ct) =>
-{
-    var result = await v.VerifyAsync(g, m, ct);
-    return Results.Json(result);
-});
+api.MapPost("/verify", async (AppliedLogVerifier v, LoadGenerator g, ClusterMonitor m, CancellationToken ct) =>
+    Results.Json(await v.VerifyAsync(g, m, ct)));
 
 app.Lifetime.ApplicationStopping.Register(() => app.Services.GetRequiredService<ProcessControl>().Dispose());
 app.Logger.LogInformation("Simulatore pronto: {Targets} indirizzi sondati, applied.log in {Path}",

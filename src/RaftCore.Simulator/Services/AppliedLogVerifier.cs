@@ -68,8 +68,10 @@ public sealed class AppliedLogVerifier
             {
                 available = false,
                 path = FilePath,
+                // RequestId è già UNIQUE in raft.IngestedData: il controllo utile è sul seq del simulatore
                 message = "applied.log non trovato. Con la state machine SQL Server la verifica si fa sul database, ad esempio: " +
-                          "SELECT RequestId, COUNT(*) FROM raft.IngestedData GROUP BY RequestId HAVING COUNT(*) > 1",
+                          "SELECT JSON_VALUE(Payload, '$.seq') AS Seq, COUNT(*) AS N FROM raft.IngestedData " +
+                          $"WHERE JSON_VALUE(Payload, '$.runId') = '{gen.RunId}' GROUP BY JSON_VALUE(Payload, '$.seq') HAVING COUNT(*) > 1",
                 nodes
             };
 

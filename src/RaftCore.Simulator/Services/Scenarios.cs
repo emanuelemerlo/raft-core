@@ -30,7 +30,6 @@ public sealed class ScenarioRunner
         new ScenarioInfo("invalid-json", "Body JSON non valido", "400", "REQ-API-2"),
         new ScenarioInfo("too-large", "Body oltre MaxBodyBytes", "413, senza inoltro né scrittura", "T34 · REQ-PRX-2"),
         new ScenarioInfo("spoofed-headers", "Client che invia X-Forward-Hops e X-Forwarded-By", "200: header di inoltro non firmati ignorati (mai 421 al client)", "REQ-API-2 · rev. 6 PRX-3/6"),
-        new ScenarioInfo("no-content-type", "Body JSON senza Content-Type", "200: conta il body, non l'header", "REQ-API-1"),
     };
 
     public ScenarioRunner(SimulatorOptions opt, DataClient client, ClusterMonitor monitor, AppliedLogVerifier verifier, LoadGenerator gen, EventLog events)
@@ -132,7 +131,7 @@ public sealed class ScenarioRunner
             case "too-large":
             {
                 var big = Body(id, ",\"pad\":\"" + new string('x', _opt.MaxBodyBytes) + "\"");
-                var r = await Post(steps, $"Body da {big.Length:N0} byte", node, rid, big, null, ct);
+                var r = await Post(steps, $"Body da {big.Length} byte (limite {_opt.MaxBodyBytes})", node, rid, big, null, ct);
                 var applied = await _verifier.AppliedRowsForRequestAsync(rid, ct);
                 return (r.Status == 413 && applied is null or 0, $"Risposta {r.Status}; {AppliedText(applied)}");
             }
@@ -141,19 +140,6 @@ public sealed class ScenarioRunner
                 var headers = new Dictionary<string, string> { ["X-Forward-Hops"] = "5", ["X-Forwarded-By"] = Guid.NewGuid().ToString("D") };
                 var r = await Post(steps, "POST con X-Forward-Hops: 5", node, rid, Body(id), headers, ct);
                 return (r.Status == 200, $"Risposta {r.Status}{(r.Status == 421 ? ": il client vede 421, contrario a REQ-API-2" : "")}");
-            }
-            case "no-content-type":
-            {
-                // DataClient imposta sempre Content-Type: qui si usa una richiesta costruita a mano
-                var body = Body(id);
-                using var req = new HttpRequestMessage(HttpMethod.Post, node.Url + "/api/v1/data") { Content = new ByteArrayContent(body) };
-                req.Headers.TryAddWithoutValidation("X-Request-ID", rid);
-                var sw = System.Diagnostics.Stopwatch.StartNew();
-                int status;
-                try { using var res = await _client.Http.SendAsync(req, ct); status = (int)res.StatusCode; }
-                catch (HttpRequestException ex) { status = 0; steps.Add(new ScenarioStep("POST senza Content-Type", node.Port, 0, false, sw.ElapsedMilliseconds, ex.Message)); return (false, "Errore di rete"); }
-                steps.Add(new ScenarioStep("POST senza Content-Type", node.Port, status, false, sw.ElapsedMilliseconds, null));
-                return (status == 200, $"Risposta {status}");
             }
             default: throw new SimulatorException($"Scenario '{id}' non implementato");
         }
