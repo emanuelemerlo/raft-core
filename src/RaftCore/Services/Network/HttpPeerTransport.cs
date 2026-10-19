@@ -72,7 +72,15 @@ public sealed class HttpPeerTransport : IPeerTransport
                     _log.LogWarning("Risposta di {Peer} ({Url}) non firmata o firma non valida: scartata", peer.NodeId, peer.Url);
                 return new RpcResult<TResp>(0, default);
             }
+            _registry.NoteSuccess(peer.NodeId);
             return new RpcResult<TResp>(200, JsonSerializer.Deserialize<TResp>(respBytes, Json));
+        }
+        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException && !ct.IsCancellationRequested)
+        {
+            // nodo spento, porta cambiata o rete interrotta: dopo alcuni fallimenti il peer viene cercato dalla discovery
+            if (_registry.NoteFailure(peer.NodeId, peer.Url) && _throttle.ShouldLog("unreach:" + peer.NodeId))
+                _log.LogWarning("Membro {Peer} irraggiungibile su {Url}: avviata la ricerca su host e porte noti", peer.NodeId, peer.Url);
+            return new RpcResult<TResp>(0, default);
         }
         catch { return new RpcResult<TResp>(0, default); }
     }

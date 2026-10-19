@@ -57,6 +57,32 @@ public class ConfigTests
         Assert.Throws<ConfigurationValidationException>(() => c.CandidatePorts());
     }
 
+    [Theory]
+    [InlineData("5001-5003", new[] { 5001, 5002, 5003 })]
+    [InlineData("5001,5003,5007", new[] { 5001, 5003, 5007 })]
+    [InlineData("5001-5003;5010;5012", new[] { 5001, 5002, 5003, 5010, 5012 })]
+    [InlineData(" 5010 ; 5001-5002 , 5010 ", new[] { 5010, 5001, 5002 })]   // ordine conservato, duplicati ignorati
+    [InlineData("5005", new[] { 5005 })]
+    public void Port_spec_supports_range_list_and_mixed(string spec, int[] expected)
+    {
+        Assert.Equal(expected, ClusterConfig.ParsePortSpec(spec));
+        var c = Valid(); c.RestPorts = spec;
+        Assert.Equal(expected, c.CandidatePorts());
+    }
+
+    [Theory]
+    [InlineData("abc")]
+    [InlineData("5003-5001")]
+    [InlineData("0")]
+    [InlineData("70000")]
+    [InlineData("1-5000")]
+    [InlineData(";,")]
+    public void Invalid_port_specs_are_rejected(string spec)
+    {
+        var ex = Assert.Throws<ConfigurationValidationException>(() => ClusterConfig.ParsePortSpec(spec));
+        Assert.Contains("5001-5005;5010;5012", ex.Violations[0]);
+    }
+
     [Fact]
     public void MaxBodyBytes_has_a_hard_limit()
     {

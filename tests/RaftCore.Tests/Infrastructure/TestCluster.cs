@@ -76,7 +76,8 @@ public sealed class NodeSpec
     public string DataDir { get; init; } = "";
     public RunningNode? Running { get; set; }
     public ShiftableClock Clock { get; } = new();
-    public string Url => $"http://127.0.0.1:{Port}";
+    /// <summary>Porta effettiva (con RestPorts può differire da Port).</summary>
+    public string Url => $"http://127.0.0.1:{Running?.Config.RestPort ?? Port}";
 }
 
 /// <summary>Cluster di nodi completi (HTTP reale su localhost) nello stesso processo, con timer accelerati.</summary>
@@ -131,6 +132,8 @@ public sealed class TestCluster : IAsyncDisposable
             ["RaftCluster:NodeId"] = n.Id,
             ["RaftCluster:RestPort"] = n.Port.ToString(),
             ["RaftCluster:RestPortRange"] = "",
+            ["RaftCluster:RestPorts"] = "",
+            ["RaftCluster:Discovery:ProbeEnabled"] = "false",
             ["RaftCluster:AdvertiseUrl"] = "http://127.0.0.1:{port}",
             ["RaftCluster:UdpMode"] = "Disabled",
             ["RaftCluster:DiscoveryPhaseMs"] = "300",

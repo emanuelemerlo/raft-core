@@ -26,12 +26,34 @@ All'avvio tutti i vincoli vengono verificati: se uno è violato il nodo **non pa
 | Parametro | Default | Note |
 | --- | --- | --- |
 | `RestPort` | 5000 | Porta HTTP (API pubblica e RPC interne) |
-| `RestPortRange` | — | Es. `5000-5010`: usa la prima porta libera (prevale su `RestPort`) |
+| `RestPorts` | — | Porte da provare in ordine: intervallo `5001-5005`, lista `5001,5003,5007` o misto `5001-5005;5010;5012`. Il nodo usa la prima libera (prevale su `RestPort`; `RestPortRange` è un alias) |
 | `AdvertiseUrl` | automatico | URL con cui gli altri nodi raggiungono questo. Supporta `{port}`. Obbligatorio dietro NAT o in container |
 | `BindInterface` | — | Interfaccia o IP da usare per l'URL automatico |
 | `UdpMode` | `Broadcast` | `Broadcast`, `Multicast` (consigliato con più istanze sulla stessa macchina Windows) o `Disabled` |
 | `UdpDiscoveryPort` | 8888 | Condivisa tra le istanze della stessa macchina |
 | `Peers` | `{}` | NodeId → URL. Opzionali con UDP funzionante; senza UDP basta che ogni nodo ne conosca uno |
+
+## Discovery a sondaggio (`Discovery`)
+
+Finché un membro non ha un indirizzo noto, o non risponde più, il nodo prova tutti gli host di `SeedHosts` (più gli host di `Peers`) su tutte le porte ammesse. Si registra solo l'indirizzo che ha risposto con una firma valida del membro atteso. Le istanze si trovano così anche se ciascuna ha preso una porta diversa dell'elenco, e anche senza UDP.
+
+| Parametro | Default | Note |
+| --- | --- | --- |
+| `SeedHosts` | `127.0.0.1` | Host su cui cercare gli altri nodi (es. i nomi dei server) |
+| `ProbePorts` | = `RestPorts` | Porte da sondare, stesso formato di `RestPorts` |
+| `ProbeEnabled` | true | |
+| `ProbeIntervalMs` | 2000 | Frequenza mentre manca qualche membro |
+| `ProbeIdleIntervalMs` | 30000 | Frequenza minima con tutti i membri raggiungibili (in pratica non si sonda) |
+| `ProbeTimeoutMs` | 500 | Timeout per singolo indirizzo |
+| `UnreachableAfterFailures` | 3 | RPC fallite consecutive dopo cui un membro viene cercato di nuovo |
+
+## Cluster di sviluppo (`DevCluster`, solo ambiente Development)
+
+| Parametro | Default | Note |
+| --- | --- | --- |
+| `Instances` | 1 | Nodi totali da avviare con un solo avvio (es. F5): questo processo è il nodo 1, gli altri `Members` diventano processi figli |
+| `ChildOutput` | `Auto` | `Window` (una console per nodo, Windows), `Prefix` (output nel processo principale con `[nodoN]`), `File` (`devcluster/logs`). `Auto` = Window su Windows, Prefix altrove |
+| `ParentPid` | — | Impostato automaticamente nei figli: il nodo si chiude quando il padre termina |
 
 ## Tempi
 
@@ -95,4 +117,4 @@ La RAM usata dal log è proporzionale a `RetainEntries` più le voci non ancora 
 | 1 | Configurazione non valida |
 | 2 | Avvio bloccato (stato assente senza `AllowEmptyState`, DataDir di un altro NodeId) |
 | 3 | DataDir già in uso da un altro processo |
-| 4 | Nessuna porta libera nell'intervallo |
+| 4 | Nessuna porta libera in `RestPorts` |

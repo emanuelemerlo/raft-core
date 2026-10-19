@@ -29,7 +29,7 @@ L'alta affidabilità complessiva dipende ora anche da quella del database (fuori
 | REQ-SEC-3 | HMAC della richiesta | HMAC della richiesta **incluso il destinatario** (`DestNodeId`). Il ricevente rifiuta con 421 se il destinatario non è sé stesso. Ogni **risposta** è firmata dal risponditore e legata al nonce della richiesta; una risposta non firmata o di un altro nodo viene scartata |
 | Threat model §5 | Un `RestUrl` stantio degrada solo la discovery | Corretto: senza verifica d'identità un URL che porta a un altro membro causerebbe un **doppio conteggio** di voti e conferme (rischio di safety con N ≥ 5). Con la firma delle risposte il rischio è eliminato |
 | REQ-DIS-4 | Registro alimentato da UDP | Fonti: RPC autenticata > UDP > gossip del Leader (`MemberUrls` negli `AppendEntries`) > configurazione. Un URL che porta al nodo sbagliato viene invalidato |
-| REQ-CFG-1 | — | Aggiunti vincoli per `Log:*`, `StateMachine:*`, `MaxBodyBytes ≤ 64 MiB`, `RestPortRange`, nomi SQL validi |
+| REQ-CFG-1 | — | Aggiunti vincoli per `Log:*`, `StateMachine:*`, `MaxBodyBytes ≤ 64 MiB`, `RestPorts`, `Discovery:*`, `DevCluster:*`, nomi SQL validi |
 
 ## Requisiti nuovi
 
@@ -46,7 +46,11 @@ Il cluster NON DEVE fermarsi per una singola voce.
 
 **REQ-STO-1 (lock della DataDir).** Un nodo DEVE acquisire un lock esclusivo sulla propria DataDir; se è in uso, NON DEVE partire (codice 3).
 
-**REQ-NET-6 (range di porte).** Con `RestPortRange` il nodo DEVE usare la prima porta TCP libera dell'intervallo e pubblicare l'URL effettivo (segnaposto `{port}`).
+**REQ-NET-6 (elenco di porte).** Con `RestPorts` (intervallo `X-Y`, lista `X,Y,Z` o misto `X-Y;A;B`) il nodo DEVE usare la prima porta TCP libera dell'elenco e pubblicare l'URL effettivo (segnaposto `{port}`).
+
+**REQ-DIS-7 (discovery a sondaggio).** Finché un membro non ha un URL noto, o dopo `UnreachableAfterFailures` RPC fallite consecutive, il nodo DEVE sondare gli host noti su tutte le porte ammesse (`POST /internal/v1/hello`, destinatario jolly `*` ammesso solo su questo endpoint, che non modifica stato). Un indirizzo viene registrato solo se la risposta è firmata dal membro che la invia.
+
+**REQ-DEV-1 (cluster di sviluppo).** Solo nell'ambiente Development il processo avviato PUÒ lanciare gli altri membri come processi figli (`DevCluster:Instances`). I figli DEVONO terminare quando il padre termina. Un segreto `dev-only-…` NON DEVE essere accettato fuori da Development.
 
 **REQ-OPS-6 (piattaforme).** Il servizio DEVE essere eseguibile come processo console, Windows Service e unità systemd (`Type=notify`). I percorsi relativi sono risolti rispetto a `BaseDirectory`, alla directory dell'eseguibile (servizio) o alla directory corrente.
 
@@ -64,7 +68,10 @@ Il cluster NON DEVE fermarsi per una singola voce.
 | T50 | URL di un membro che porta a un altro membro | Risposta scartata, URL invalidato, nessun doppio conteggio |
 | T51 | Follower che conoscono solo il Leader; il Leader cade | Nuovo Leader eletto grazie agli URL propagati |
 | T52 | Seconda istanza sulla stessa DataDir | Non parte (codice 3) |
-| T53 | Porta occupata con `RestPortRange` | Il nodo usa la porta libera successiva |
+| T53 | Porta occupata con `RestPorts` | Il nodo usa la porta libera successiva |
+| T54 | Tre nodi su un elenco di porte, senza Peers né UDP | Si trovano tramite sondaggio; Leader eletto |
+| T55 | Nodo riavviato su un'altra porta (la sua è occupata) | Gli altri lo ritrovano; il nodo si riallinea e inoltra al Leader |
+| T56 | Un solo avvio in Development con `DevCluster:Instances=3` | Tre nodi attivi; uccidendo il padre i figli terminano |
 
 ## Fuori ambito (invariato salvo dove indicato)
 

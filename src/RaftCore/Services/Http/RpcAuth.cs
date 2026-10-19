@@ -17,6 +17,11 @@ public static class RpcAuth
 {
     public const string HNode = "X-Cluster-Node", HTime = "X-Cluster-Timestamp", HNonce = "X-Cluster-Nonce", HSig = "X-Cluster-Signature",
         HDest = "X-Cluster-Dest", HExtra = "X-Cluster-Extra";
+    /// <summary>Endpoint di sondaggio della discovery: l'unico che accetta il destinatario jolly (non modifica stato).</summary>
+    public const string HelloPath = "/internal/v1/hello", AnyDestination = "*";
+
+    public static bool DestinationMatches(string dest, string selfId, string? path) =>
+        ClusterConfig.Norm(dest) == selfId || (dest == AnyDestination && path == HelloPath);
 
     public static string Sign(string secret, string method, string path, long tsMs, ReadOnlySpan<byte> body, string nodeId, string nonce, string dest, string extra = "")
     {
@@ -73,7 +78,7 @@ public sealed class RpcVerifier
         string nonce = h[RpcAuth.HNonce].ToString(), dest = h[RpcAuth.HDest].ToString();
         var expected = RpcAuth.Sign(_cfg.ClusterSecret, req.Method, req.Path.Value ?? "", ts, body, node, nonce, dest, extra);
         if (!RpcAuth.FixedEquals(expected, h[RpcAuth.HSig].ToString())) { _metrics.Inc("rpcInvalidAuth"); return RpcVerifyResult.BadSignature; }
-        if (ClusterConfig.Norm(dest) != _members.SelfId) { _metrics.Inc("rpcWrongDestination"); return RpcVerifyResult.WrongDestination; }
+        if (!RpcAuth.DestinationMatches(dest, _members.SelfId, req.Path.Value)) { _metrics.Inc("rpcWrongDestination"); return RpcVerifyResult.WrongDestination; }
         long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         Purge(nowMs);
         if (!_nonces.TryAdd(node + ":" + nonce, nowMs + 2L * _cfg.RpcClockToleranceMs + 1000)) { _metrics.Inc("rpcReplayRejected"); return RpcVerifyResult.Replay; }

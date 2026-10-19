@@ -14,3 +14,5 @@ coverage*/
 data/
 data-*/
 *.wal
+devcluster/
+shared-state/

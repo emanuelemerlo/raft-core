@@ -26,6 +26,10 @@ Solo il Leader scrive sul database, e ogni scrittura è condizionata a `LastAppl
 
 ## Avvio rapido: 3 istanze sulla stessa macchina
 
+**Visual Studio**: aprire `RaftCore.sln`, profilo *Cluster 3 nodi (debug nodo 1)*, **F5**. Il nodo 1 va in debug e avvia da solo i nodi 2 e 3; la configurazione è già pronta in `appsettings.Development.json`. Shift+F5 chiude tutto. Dettagli in [Avvio rapido](docs/wiki/Avvio-rapido.md).
+
+**Riga di comando**:
+
 Prerequisito: [.NET 8 SDK](https://dotnet.microsoft.com/download).
 
 ```bash

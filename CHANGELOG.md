@@ -5,6 +5,23 @@ Il workflow di release usa la sezione della versione come note di rilascio.
 
 ## [Unreleased]
 
+### Aggiunto
+- **Cluster di sviluppo con un solo avvio**:
+  - in ambiente Development con `DevCluster:Instances` > 1, il processo avviato (es. F5 in Visual Studio, l'unico in debug) è il nodo 1 e lancia gli altri membri come processi figli;
+  - i figli si aprono in una finestra console per nodo su Windows, oppure con l'output prefissato;
+  - i figli si chiudono quando il padre termina, anche con lo stop del debugger.
+- **Configurazione di sviluppo preimpostata** (`appsettings.Development.json`) e **profili di avvio** di Visual Studio: cluster da 3 nodi, nodo singolo, singoli nodi 1/2/3.
+- **`RestPorts`**: porte in formato intervallo (`5001-5005`), lista (`5001,5003,5007`) o misto (`5001-5005;5010;5012`). Il nodo usa la prima libera. `RestPortRange` resta come alias.
+- **Discovery a sondaggio**:
+  - finché un membro non ha un indirizzo noto, o non risponde più, il nodo prova gli host di `Discovery:SeedHosts` (e di `Peers`) su tutte le porte ammesse;
+  - l'identità di chi risponde è verificata dalla firma;
+  - le istanze si trovano anche con porte dinamiche e senza UDP, e un nodo riavviato su un'altra porta viene ritrovato.
+- Metriche `probeRounds` e `probeFound`.
+
+### Modificato
+- Un segreto `dev-only-…` viene rifiutato fuori dall'ambiente Development.
+- Log della console senza gli scope di tracing (`SpanId`/`TraceId`).
+
 ## [0.2.0] - 2026-10-19
 
 Prima versione orientata alla produzione su SQL Server condiviso. **Contiene modifiche incompatibili** con la configurazione e lo storage della 0.1 (vedi "Migrazione").
