@@ -35,7 +35,7 @@ jobs:
       - name: Build
         run: dotnet build RaftCore.sln -c Release --no-restore
       - name: Test (unit, cluster, E2E)
-        run: dotnet test RaftCore.sln -c Release --no-build --filter "Category!=SqlServer" --logger "trx;LogFileName=results.trx" --logger "console;verbosity=normal"
+        run: dotnet test RaftCore.sln -c Release --no-build --filter "Category!=SqlServer" --logger "trx;LogFileName=results.trx" --logger "console;verbosity=normal" --logger GitHubActions
       - name: Log dei nodi (solo in caso di errore)
         if: failure()
         uses: actions/upload-artifact@v4
@@ -69,7 +69,7 @@ jobs:
         with:
           dotnet-version: 8.0.x
       - name: Test SQL Server
-        run: dotnet test RaftCore.sln -c Release --filter "Category=SqlServer" --logger "console;verbosity=normal"
+        run: dotnet test RaftCore.sln -c Release --filter "Category=SqlServer" --logger "console;verbosity=normal" --logger GitHubActions
       - name: Log dei nodi (solo in caso di errore)
         if: failure()
         uses: actions/upload-artifact@v4

@@ -1,0 +1,11 @@
+**RaftCore**
+- [Home](Home)
+- [Avvio rapido](Avvio-rapido)
+- [Contratto client](Contratto-client)
+- [Configurazione](Configurazione)
+- [Architettura](Architettura)
+- [SQL Server](SQL-Server)
+- Deploy: [Windows](Deploy-Windows-Service) · [Linux](Deploy-Linux-systemd) · [Docker](Docker)
+- [Operazioni](Operazioni)
+- [Risoluzione dei problemi](Risoluzione-problemi)
+- [Rilasci](Rilasci)
