@@ -1,0 +1,16 @@
+# Build
+bin/
+obj/
+artifacts/
+publish/
+*.user
+*.suo
+.vs/
+.vscode/
+.idea/
+TestResults/
+coverage*/
+# Dati di runtime locali
+data/
+data-*/
+*.wal

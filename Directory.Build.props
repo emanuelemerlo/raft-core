@@ -1,0 +1,12 @@
+<Project>
+  <PropertyGroup>
+    <Version>0.2.0</Version>
+    <Authors>Emanuele Merlo</Authors>
+    <Product>RaftCore</Product>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+</Project>
