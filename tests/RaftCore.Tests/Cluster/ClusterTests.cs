@@ -288,26 +288,40 @@ public class ClusterTests
         c.Extra["RaftCluster:FailoverWaitMs"] = "1000";
         c.Extra["RaftCluster:StateMachine:MaxPendingAgeMinutes"] = "60";
         await c.StartAllAsync();
-        int l = await c.WaitForLeaderAsync();
+        var rid = Id();
+        var all = c.Nodes.Select(n => n.Id.ToLowerInvariant()).ToList();
+        int l = -1;
+        for (int attempt = 1; ; attempt++)
+        {
+            // Partizione totale istantanea: il Leader, con il lease ancora valido, appende la voce ma non può committarla;
+            // i Follower non possono eleggere nessuno. (Fermare i Follower richiede tempo: il lease può scadere prima della POST.)
+            l = await c.WaitForLeaderAsync();
+            long before = c.Raft(l).Probe().Last;
+            foreach (var a in all) c.Faults.Isolate(a, all.Where(b => b != a));
+            var lost = await c.PostAsync(l, rid, "{\"stale\":true}");
+            Assert.NotEqual(200, lost.Status);
+            if (c.Raft(l).Probe().Last > before) break;                                  // voce nel log del Leader, mai committed
+            Assert.True(attempt < 3, "la voce non è mai stata appesa dal Leader");
+            c.Faults.HealAll();                                                          // lease scaduto prima della POST: si riprova
+        }
+        await c.WaitUntilAsync(() => !c.Raft(l).IsLeader, TimeSpan.FromSeconds(3), "step down");
         var followers = c.Running.Where(i => i != l).ToList();
         foreach (var f in followers) await c.StopAsync(f);
-        var rid = Id();
-        var lost = await c.PostAsync(l, rid, "{\"stale\":true}");                        // scritta nel log del Leader, mai committed
-        Assert.NotEqual(200, lost.Status);
-        await c.WaitUntilAsync(() => !c.Raft(l).IsLeader, TimeSpan.FromSeconds(3), "step down");
         c.Nodes[l].Clock.Offset = TimeSpan.FromDays(14);                               // "due settimane dopo"
-        foreach (var f in followers) await c.StartAsync(f, allowEmpty: false);
-        await c.WaitUntilAsync(() => c.AppliedRows().Any(r => r.RequestId == rid) || c.LeaderIndex() is int x && x != l && c.Raft(x).Probe().Applied > 0,
-            TimeSpan.FromSeconds(20), "esito della voce in sospeso");
-        var row = c.AppliedRows().SingleOrDefault(r => r.RequestId == rid);
-        if (row.RequestId != null)
-        {
-            Assert.Equal(ApplyStatus.Expired, row.Status);                              // committata dall'ex Leader: scaduta, non scritta
-            Assert.Equal("", row.Payload);
-            var retry = await c.PostAsync(l, rid, "{\"stale\":true}");
-            Assert.Equal(410, retry.Status);
-        }
-        else _out.WriteLine("La voce è stata scartata dal nuovo Leader (log meno aggiornato): nessuna scrittura, comportamento corretto.");
+        c.Faults.HealAll();
+        // Si riavvia un solo Follower: con due nodi l'unico eleggibile è l'ex Leader, che ha il log più aggiornato
+        // (contiene la voce). Così la voce viene committata "due settimane dopo" in modo deterministico.
+        await c.StartAsync(followers[0], allowEmpty: false);
+        await c.WaitUntilAsync(() => c.Raft(l).IsLeader, TimeSpan.FromSeconds(20), "rielezione dell'ex Leader");
+        await c.StartAsync(followers[1], allowEmpty: false);
+        await c.WaitUntilAsync(() => c.LeaderIndex() is int x && c.Raft(x).GetReadiness().Ready
+                                     && c.Raft(x).Probe().Commit > 0 && c.Raft(x).Probe().Applied >= c.Raft(x).Probe().Commit,
+            TimeSpan.FromSeconds(20), "Leader con tutte le voci committed applicate");
+        var row = c.AppliedRows().Single(r => r.RequestId == rid);
+        Assert.Equal(ApplyStatus.Expired, row.Status);                                  // committata dopo 14 giorni: scaduta, non scritta
+        Assert.Equal("", row.Payload);
+        var retry = await c.PostAsync(c.LeaderIndex()!.Value, rid, "{\"stale\":true}");
+        Assert.Equal(410, retry.Status);
         Assert.DoesNotContain(c.AppliedRows(), r => r.RequestId == rid && r.Status == ApplyStatus.Applied);
     }
 
