@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>RaftCore</AssemblyName>
+    <RootNamespace>RaftCore</RootNamespace>
+    <UserSecretsId>dotnet-RaftWorkerService-8378d317-0d28-4e8c-8fbd-19a93c9d2f2f</UserSecretsId>
+    <!-- Microsoft.Data.SqlClient non supporta la Globalization Invariant Mode -->
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.2" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="RaftCore.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\sql\**\*.sql" Link="sql\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <EmbeddedResource Include="..\..\sql\001_init.sql" LogicalName="RaftCore.sql.001_init.sql" />
+  </ItemGroup>
+
+</Project>
