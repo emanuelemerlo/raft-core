@@ -20,14 +20,14 @@ public class PeerInfo
     public long Sequence { get; set; }
     public NodeRole Role { get; set; }
     public long Term { get; set; }
-    public string? BestUrl => RpcUrl ?? UdpUrl ?? StaticUrl ?? GossipUrl;
+    public string? BestUrl => RpcUrl ?? UdpUrl ?? GossipUrl ?? StaticUrl;
 }
 
 public enum RegisterResult { Accepted, Replay }
 
 /// <summary>
 /// REQ-DIS-3/4/5: endpoint dei peer, NON influisce sul quorum. Più fonti con priorità
-/// RPC autenticata &gt; annuncio UDP &gt; configurazione statica &gt; gossip del Leader.
+/// RPC autenticata &gt; annuncio UDP &gt; gossip del Leader &gt; configurazione statica (che può essere obsoleta).
 /// Un URL che risulta portare a un altro nodo (risposta firmata da un NodeId diverso) viene invalidato.
 /// </summary>
 public sealed class PeerRegistry

@@ -57,8 +57,13 @@ public static class NodeHost
     /// <param name="configure">Override dei servizi (test: trasporto con fault injection, repository, orologio).</param>
     /// <param name="settings">Override della configurazione (test).</param>
     public static async Task<RunningNode> StartAsync(string[] args, Action<IServiceCollection, ClusterConfig>? configure = null,
-        IDictionary<string, string?>? settings = null, CancellationToken ct = default)
+        IDictionary<string, string?>? settings = null, CancellationToken ct = default, string? contentRoot = null)
     {
+        _contentRoot.Value = contentRoot;
+        // fsync e lock sincroni occupano thread del pool: con pochi core la crescita lenta del pool introdurrebbe
+        // pause di centinaia di ms, sufficienti a far scadere il lease del Leader (elezioni spurie).
+        ThreadPool.GetMinThreads(out var minWorker, out var minIo);
+        ThreadPool.SetMinThreads(Math.Max(minWorker, Math.Max(32, 4 * Environment.ProcessorCount)), Math.Max(minIo, 32));
         var probe = BuildConfig(args, settings);
         var ports = probe.CandidatePorts();
         var errors = new List<string>();
@@ -84,11 +89,13 @@ public static class NodeHost
         return cfg;
     }
 
+    private static readonly AsyncLocal<string?> _contentRoot = new();
+
     private static WebApplicationOptions Options(string[] args) => new()
     {
         Args = args,
         // appsettings.json accanto all'eseguibile, anche quando avviato come servizio o da un'altra directory
-        ContentRootPath = AppContext.BaseDirectory
+        ContentRootPath = _contentRoot.Value ?? AppContext.BaseDirectory
     };
 
     private static async Task<RunningNode> TryStartOnPortAsync(string[] args, IDictionary<string, string?>? settings, int port,
