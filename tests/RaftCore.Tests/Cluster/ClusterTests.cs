@@ -112,6 +112,33 @@ public class ClusterTests
     }
 
     [Fact]
+    public async Task Failover_is_fast_even_when_rpcs_to_the_dead_leader_hang_until_timeout()
+    {
+        // Su Windows una connessione verso una porta chiusa non viene rifiutata subito: il candidato non deve attendere
+        // il nodo morto in ogni round (PreVote + voto), altrimenti i round si allungano e i voti contesi si ripetono.
+        await using var c = TestCluster.Create(3);
+        c.Extra["RaftCluster:ReplicationTimeoutMs"] = "1500";                            // RPC verso il morto: fino a 300 ms per round
+        await c.StartAllAsync();
+        int l = await c.WaitForLeaderAsync();
+        var times = new List<double>();
+        for (int round = 0; round < 3; round++)
+        {
+            c.Faults.Blackhole(c.Nodes[l].Id.ToLowerInvariant());
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            await c.StopAsync(l);
+            int nl = await c.WaitForLeaderAsync(TimeSpan.FromSeconds(10), exclude: l);
+            times.Add(sw.Elapsed.TotalSeconds);
+            Assert.Equal(200, (await c.PostAsync(nl, Id(), "{\"r\":" + round + "}")).Status);
+            c.Faults.HealAll();
+            await c.StartAsync(l, allowEmpty: false);
+            await c.WaitUntilAsync(() => c.Raft(l).Probe().Commit == c.Raft(nl).Probe().Commit, TimeSpan.FromSeconds(10), "rientro");
+            l = nl;
+        }
+        _out.WriteLine("failover (s): " + string.Join(", ", times.Select(t => t.ToString("F2"))));
+        Assert.All(times, t => Assert.True(t < 3.0, $"failover {t:F2} s"));
+    }
+
+    [Fact]
     public async Task Followers_that_only_knew_the_leader_elect_a_new_one_after_it_dies()
     {
         // Il problema osservato: con discovery incompleta i Follower conoscevano solo il Leader e restavano in PreVote
@@ -275,8 +302,10 @@ public class ClusterTests
         int l = await c.WaitForLeaderAsync();
         var r = await c.PostAsync(l, Id(), "{\"t\":1}");
         Assert.Equal(200, r.Status);
-        Assert.Equal(0, c.Raft(l).GetMetrics()["applyQuarantined"]);
-        Assert.True(c.Raft(l).GetMetrics()["applyTransientErrors"] >= 8);
+        // la leadership può passare a un altro nodo durante il test: le metriche si sommano su tutti i nodi
+        long Sum(string m) => c.Running.Sum(i => c.Raft(i).GetMetrics()[m]);
+        Assert.Equal(0, Sum("applyQuarantined"));
+        Assert.True(Sum("applyTransientErrors") >= 8, $"applyTransientErrors = {Sum("applyTransientErrors")}");
     }
 
     [Fact]
