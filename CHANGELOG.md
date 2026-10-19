@@ -43,6 +43,7 @@ Prima versione orientata alla produzione su SQL Server condiviso. **Contiene mod
 - **Thread pool**: viene impostato un minimo all'avvio. Su macchine con pochi core le pause dovute a fsync sincroni facevano scadere il lease del Leader.
 
 ### Corretto
+- Windows: la sostituzione atomica di `raft_state.json` poteva fallire con "accesso negato" se un altro processo (tipicamente l'antivirus) teneva aperto il file per un istante, rendendo il nodo `unhealthy` al primo voto. Ora vengono fatti tentativi ripetuti per un tempo limitato.
 - **Nodo bloccato in PreVote** dopo la caduta del Leader quando la discovery UDP era incompleta (ad esempio più istanze sulla stessa macchina Windows).
 - **Deadlock in modalità Bootstrap** (inversione dell'ordine dei lock tra membri e nodo), e ammissione di nodi con `ClusterSize` diverso.
 - **Voci committed troncate al riavvio** dopo aver ridotto `MaxBodyBytes`.

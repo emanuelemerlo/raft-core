@@ -75,13 +75,34 @@ public static class Durability
     public static void WriteAllBytesDurable(string path, ReadOnlySpan<byte> data)
     {
         var tmp = path + ".tmp";
-        using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+        var bytes = data.ToArray();
+        WindowsRetry(() =>
         {
-            fs.Write(data);
+            using var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None);
+            fs.Write(bytes);
             FlushFile(fs);
-        }
-        File.Move(tmp, path, true);
+        });
+        MoveReplacing(tmp, path);
         SyncDirectory(Path.GetDirectoryName(path));
+    }
+
+    /// <summary>
+    /// Sostituzione atomica del file. Su Windows MoveFileEx fallisce (accesso negato / file in uso) se un altro processo
+    /// tiene aperto per un istante il file di destinazione o quello appena scritto, tipicamente l'antivirus:
+    /// si ritenta per un tempo limitato invece di dichiarare lo storage non affidabile.
+    /// </summary>
+    public static void MoveReplacing(string source, string destination) => WindowsRetry(() => File.Move(source, destination, true));
+
+    private static void WindowsRetry(Action op)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            try { op(); return; }
+            catch (Exception ex) when (OperatingSystem.IsWindows() && attempt < 40 && ex is UnauthorizedAccessException or IOException)
+            {
+                Thread.Sleep(Math.Min(10 * (attempt + 1), 50));
+            }
+        }
     }
 }
 
