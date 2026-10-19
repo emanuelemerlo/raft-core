@@ -23,10 +23,18 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git clone "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" wiki
+          url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git"
+          if ! git ls-remote "$url" > /dev/null 2>&1; then
+            echo "::error title=Wiki non inizializzata::Il repository ${GITHUB_REPOSITORY}.wiki.git non esiste ancora. Aprire https://github.com/${GITHUB_REPOSITORY}/wiki, creare e salvare una prima pagina qualsiasi (es. Home), poi rieseguire questo workflow (Actions > Wiki > Run workflow)."
+            exit 1
+          fi
+          git clone "$url" wiki
           rsync -a --delete --exclude .git docs/wiki/ wiki/
           cd wiki
           git add -A
           git diff --cached --quiet && { echo "Wiki già aggiornata"; exit 0; }
           git commit -m "Aggiornamento da ${GITHUB_SHA::7}"
-          git push
+          if ! git push; then
+            echo "::error title=Push sulla Wiki rifiutato::Il token del workflow non può scrivere sulla Wiki. Verificare Settings > Actions > General > Workflow permissions = Read and write."
+            exit 1
+          fi
