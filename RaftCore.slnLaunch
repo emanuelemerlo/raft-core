@@ -1,0 +1,32 @@
+[
+  {
+    "Name": "Cluster + Simulatore",
+    "Projects": [
+      {
+        "Path": "src\\RaftCore\\RaftCore.csproj",
+        "Action": "Start",
+        "DebugTarget": "Cluster 3 nodi (debug nodo 1)"
+      },
+      {
+        "Path": "src\\RaftCore.Simulator\\RaftCore.Simulator.csproj",
+        "Action": "Start",
+        "DebugTarget": "Simulatore"
+      }
+    ]
+  },
+  {
+    "Name": "Cluster + Simulatore (simulatore senza debug)",
+    "Projects": [
+      {
+        "Path": "src\\RaftCore\\RaftCore.csproj",
+        "Action": "Start",
+        "DebugTarget": "Cluster 3 nodi (debug nodo 1)"
+      },
+      {
+        "Path": "src\\RaftCore.Simulator\\RaftCore.Simulator.csproj",
+        "Action": "StartWithoutDebugging",
+        "DebugTarget": "Simulatore"
+      }
+    ]
+  }
+]

@@ -25,6 +25,10 @@ Altri profili:
 
 Per seguire in debug anche un nodo figlio: **Debug → Connetti a processo** e scegliere `RaftCore.exe` con il titolo della finestra corrispondente.
 
+### Con il simulatore client
+
+Il profilo multiplo **Cluster + Simulatore** avvia insieme il cluster e il [simulatore client](Simulatore) (http://localhost:5100). Il simulatore fa invio ciclico di dati, esegue gli scenari di idempotenza ed errore, fa kill e pausa dei nodi e verifica le scritture. Richiede Visual Studio 2022 17.11 o successivo.
+
 Prova rapida (PowerShell):
 
 ```powershell

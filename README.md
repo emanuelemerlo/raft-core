@@ -28,6 +28,8 @@ Solo il Leader scrive sul database, e ogni scrittura è condizionata a `LastAppl
 
 **Visual Studio**: aprire `RaftCore.sln`, profilo *Cluster 3 nodi (debug nodo 1)*, **F5**. Il nodo 1 va in debug e avvia da solo i nodi 2 e 3; la configurazione è già pronta in `appsettings.Development.json`. Shift+F5 chiude tutto. Dettagli in [Avvio rapido](docs/wiki/Avvio-rapido.md).
 
+Con il profilo multiplo **Cluster + Simulatore** parte anche il [simulatore client](docs/wiki/Simulatore.md) (http://localhost:5100): invio ciclico di dati, scenari di idempotenza ed errore, kill e pausa dei nodi, verifica delle scritture.
+
 **Riga di comando**:
 
 Prerequisito: [.NET 8 SDK](https://dotnet.microsoft.com/download).
@@ -58,6 +60,7 @@ docker compose -f deploy/docker/docker-compose.yml up --build
 | Argomento | Pagina |
 | --- | --- |
 | Primi passi e prove di failover | [Avvio rapido](docs/wiki/Avvio-rapido.md) |
+| Invio dati, scenari e guasti dall'interfaccia web | [Simulatore client](docs/wiki/Simulatore.md) |
 | Tutti i parametri | [Configurazione](docs/wiki/Configurazione.md) |
 | Come funziona dentro | [Architettura](docs/wiki/Architettura.md) |
 | Database, writer personalizzato, quarantena | [SQL Server](docs/wiki/SQL-Server.md) |

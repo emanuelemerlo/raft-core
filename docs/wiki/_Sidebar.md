@@ -1,6 +1,7 @@
 **RaftCore**
 - [Home](Home)
 - [Avvio rapido](Avvio-rapido)
+- [Simulatore client](Simulatore)
 - [Contratto client](Contratto-client)
 - [Configurazione](Configurazione)
 - [Architettura](Architettura)
