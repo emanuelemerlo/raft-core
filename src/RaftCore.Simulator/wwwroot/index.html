@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RaftCore Simulatore</title>
+<style>
+:root {
+  --bg: #f4f5f7; --panel: #ffffff; --panel-2: #f8f9fb; --line: #e2e5ea; --text: #1b1f24; --muted: #667080;
+  --accent: #2f5fd0; --accent-soft: #e6edfb;
+  --ok: #1f8a4c; --ok-soft: #e3f4ea; --warn: #b26a00; --warn-soft: #fbf0dc; --err: #c4323b; --err-soft: #fbe5e6;
+  --leader: #7a3fd1; --leader-soft: #efe6fb;
+  --c-ok: #2e9e5b; --c-retry: #e0a526; --c-rej: #d9534f; --c-gave: #7d1f24; --c-line: #2f5fd0;
+  --mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, monospace;
+  --radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111418; --panel: #191d23; --panel-2: #1f242b; --line: #2b313a; --text: #e6e8eb; --muted: #949ca8;
+    --accent: #6f95ff; --accent-soft: #1f2a44;
+    --ok: #4cc27f; --ok-soft: #16301f; --warn: #e5a53a; --warn-soft: #33270f; --err: #ff6b72; --err-soft: #3a1a1d;
+    --leader: #b18cff; --leader-soft: #2b2140;
+    --c-ok: #3fb872; --c-retry: #e6b440; --c-rej: #ef6461; --c-gave: #b8323a; --c-line: #7fa2ff;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 14px 20px; background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
+header h1 { font-size: 17px; margin: 0; font-weight: 650; letter-spacing: -.01em; }
+header h1 span { color: var(--muted); font-weight: 500; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12.5px; font-weight: 600; background: var(--panel-2); border: 1px solid var(--line); white-space: nowrap; }
+.chip.ok { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+.chip.err { background: var(--err-soft); color: var(--err); border-color: transparent; }
+.chip.warn { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+.chip.leader { background: var(--leader-soft); color: var(--leader); border-color: transparent; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.spacer { flex: 1; }
+.muted { color: var(--muted); }
+.mono { font-family: var(--mono); font-size: 12.5px; }
+main { padding: 18px 20px 40px; display: grid; gap: 18px; max-width: 1500px; margin: 0 auto; }
+.cols { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+@media (max-width: 1100px) { .cols { grid-template-columns: 1fr; } }
+section.panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; min-width: 0; }
+section.panel + section.panel { margin-top: 18px; }
+.panel-h { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.panel-h h2 { font-size: 15px; margin: 0; font-weight: 650; }
+.panel-h p { margin: 0; }
+button, select, input { font: inherit; color: inherit; }
+button, a.btn { border: 1px solid var(--line); text-decoration: none; color: inherit; background: var(--panel-2); padding: 6px 12px; border-radius: 7px; cursor: pointer; font-weight: 550; }
+button:hover, a.btn:hover { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: default; border-color: var(--line); }
+button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+button.danger { color: var(--err); }
+button.danger.solid { background: var(--err); color: #fff; border-color: var(--err); }
+button.small, a.btn.small { padding: 3px 9px; font-size: 12.5px; }
+select, input[type=number] { border: 1px solid var(--line); background: var(--panel); padding: 5px 8px; border-radius: 7px; }
+input[type=number] { width: 84px; }
+label.field { display: inline-flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+
+/* nodi */
+.nodes { display: grid; grid-template-columns: repeat(auto-fill, minmax(255px, 1fr)); gap: 12px; }
+.node { border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; background: var(--panel-2); display: flex; flex-direction: column; gap: 8px; }
+.node.is-leader { border-color: var(--leader); box-shadow: 0 0 0 1px var(--leader) inset; }
+.node.down { opacity: .7; border-style: dashed; }
+.node-h { display: flex; align-items: center; gap: 8px; }
+.node-h b { font-family: var(--mono); font-size: 13.5px; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-size: 12.5px; }
+.kv dt { color: var(--muted); } .kv dd { margin: 0; font-family: var(--mono); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.node .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: auto; }
+.empty { padding: 22px; text-align: center; color: var(--muted); border: 1px dashed var(--line); border-radius: var(--radius); }
+
+/* statistiche */
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 8px; margin: 14px 0; }
+.tile { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.tile .v { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.tile .l { font-size: 11.5px; color: var(--muted); }
+.tile.ok .v { color: var(--ok); } .tile.warn .v { color: var(--warn); } .tile.err .v { color: var(--err); }
+.chart-wrap { position: relative; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); padding: 8px; }
+canvas { width: 100%; height: 170px; display: block; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-top: 6px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+th { text-align: left; color: var(--muted); font-weight: 550; padding: 5px 6px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); }
+td { padding: 4px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.scroll { max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+.st { font-family: var(--mono); font-weight: 600; }
+.st.ok { color: var(--ok); } .st.warn { color: var(--warn); } .st.err { color: var(--err); }
+
+/* scenari */
+.scen { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: start; }
+.scen + .scen { margin-top: 8px; }
+.scen h3 { margin: 0; font-size: 13.5px; font-weight: 600; }
+.scen .exp { font-size: 12.5px; color: var(--muted); }
+.scen .spec { font-size: 11.5px; color: var(--muted); font-family: var(--mono); }
+.scen .res { grid-column: 1 / -1; font-size: 12.5px; padding-top: 6px; border-top: 1px dashed var(--line); margin-top: 4px; }
+.scen .res.pass .verdict { color: var(--ok); font-weight: 650; } .scen .res.fail .verdict { color: var(--err); font-weight: 650; }
+.steps { margin: 4px 0 0; padding-left: 18px; font-family: var(--mono); font-size: 12px; }
+
+/* eventi */
+.events { list-style: none; margin: 0; padding: 0; max-height: 420px; overflow: auto; font-size: 12.5px; }
+.events li { display: grid; grid-template-columns: 86px 1fr; gap: 8px; padding: 4px 2px; border-bottom: 1px solid var(--line); }
+.events time { font-family: var(--mono); color: var(--muted); font-size: 12px; }
+.events li.ok span { color: var(--ok); } .events li.warn span { color: var(--warn); } .events li.error span { color: var(--err); }
+
+.verify-out { margin-top: 10px; font-size: 13px; }
+.verify-out .big { font-weight: 650; font-size: 14px; margin-bottom: 6px; }
+.verify-out .big.ok { color: var(--ok); } .verify-out .big.err { color: var(--err); }
+.verify-out dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 14px; margin: 6px 0; }
+.verify-out dt { color: var(--muted); } .verify-out dd { margin: 0; font-family: var(--mono); }
+.toast { position: fixed; right: 18px; bottom: 18px; max-width: 420px; background: var(--text); color: var(--bg); padding: 10px 14px; border-radius: 8px; font-size: 13px; opacity: 0; transform: translateY(8px); transition: .2s; pointer-events: none; z-index: 10; }
+.toast.show { opacity: 1; transform: none; }
+.hint { font-size: 12.5px; color: var(--muted); margin: 8px 0 0; }
+code { font-family: var(--mono); font-size: 12px; background: var(--panel-2); padding: 1px 4px; border-radius: 4px; }
+@media (max-width: 640px) { header, main { padding-left: 16px; padding-right: 16px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>RaftCore <span>· simulatore client</span></h1>
+  <span id="leaderChip" class="chip">in attesa dei nodi…</span>
+  <span id="runChip" class="chip mono muted"></span>
+  <span class="spacer"></span>
+  <span id="connChip" class="chip">●</span>
+</header>
+
+<main>
+  <section class="panel">
+    <div class="panel-h">
+      <h2>Cluster</h2>
+      <p class="muted" id="scanInfo"></p>
+      <span class="spacer"></span>
+      <button class="danger" id="killLeader" title="Terminazione immediata del Leader (kill -9)">Kill del Leader</button>
+      <label class="field" style="flex-direction:row;align-items:center;gap:6px">
+        <input type="number" id="pauseSec" value="5" min="1" max="300"> s
+      </label>
+      <button id="pauseLeader" title="Sospende il processo del Leader (SIGSTOP / NtSuspendProcess)">Pausa del Leader</button>
+    </div>
+    <div class="nodes" id="nodes"></div>
+    <p class="hint">Kill = terminazione brutale senza shutdown ordinato. Pausa = il processo resta congelato e poi riprende, come uno stallo di GC o una VM sospesa (T14). Il nodo con il badge <b>debug</b> è il nodo 1 avviato da Visual Studio: se termina, si chiudono anche gli altri.</p>
+  </section>
+
+  <div class="cols">
+    <div>
+      <section class="panel">
+        <div class="panel-h">
+          <h2>Invio ciclico</h2>
+          <span id="genChip" class="chip">fermo</span>
+        </div>
+        <div class="row">
+          <label class="field">Intervallo (ms)
+            <input type="number" id="interval" min="5" max="60000" step="10" value="200">
+          </label>
+          <label class="field">Destinazione
+            <select id="target"></select>
+          </label>
+          <label class="field">Riempimento (byte)
+            <input type="number" id="pad" min="0" step="1024" value="0">
+          </label>
+          <button class="primary" id="startStop">Avvia</button>
+          <button id="sendOne">Invia una</button>
+          <span style="display:inline-flex;gap:6px;align-items:flex-end">
+            <label class="field">Raffica
+              <input type="number" id="burstN" value="50" min="1" max="2000">
+            </label>
+            <button id="burst">Invia raffica</button>
+          </span>
+        </div>
+        <p class="hint">Ogni messaggio è <code>{"seq": n, "timestamp": "…", "source": "simulatore", "runId": "…"}</code>. Il client segue il contratto: stesso <code>X-Request-ID</code> e stessi byte a ogni ritento, retry su errore di rete, 503 e 504 con backoff e jitter, mai su 4xx.</p>
+
+        <div class="tiles" id="tiles"></div>
+
+        <div class="chart-wrap">
+          <canvas id="chart"></canvas>
+          <div class="legend">
+            <span><i style="background:var(--c-ok)"></i>200</span>
+            <span><i style="background:var(--c-retry)"></i>200 dopo retry</span>
+            <span><i style="background:var(--c-rej)"></i>4xx</span>
+            <span><i style="background:var(--c-gave)"></i>abbandonate</span>
+            <span><i style="background:var(--c-line);height:2px;vertical-align:3px"></i>ritenti</span>
+            <span class="spacer"></span><span>ultimi 120 s, per secondo</span>
+          </div>
+        </div>
+
+        <div id="failovers" class="hint"></div>
+
+        <div class="panel-h" style="margin-top:14px">
+          <h2 style="font-size:14px">Ultime operazioni</h2>
+          <span class="spacer"></span>
+          <button class="small" id="reset">Azzera statistiche</button>
+          <a class="btn small" href="/sim/ops.csv" download="operazioni.csv">Esporta CSV</a>
+        </div>
+        <div class="scroll">
+          <table>
+            <thead><tr><th>#</th><th>Ora</th><th>Request-ID</th><th>Esito</th><th>Percorso (porta:status)</th><th class="num">ms</th></tr></thead>
+            <tbody id="ops"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-h">
+          <h2>Verifica delle scritture</h2>
+          <span class="spacer"></span>
+          <button class="primary" id="verify">Verifica ora</button>
+        </div>
+        <p class="muted" style="margin:0">Confronta le operazioni inviate con <span class="mono" id="appliedPath"></span>: nessun duplicato, nessun 200 senza scrittura. Le operazioni abbandonate possono essere state scritte comunque (REQ-API-3).</p>
+        <div class="verify-out" id="verifyOut"></div>
+      </section>
+    </div>
+
+    <div>
+      <section class="panel">
+        <div class="panel-h"><h2>Scenari</h2><span class="spacer"></span><button class="small" id="runAll">Esegui tutti</button></div>
+        <div id="scenarios"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-h"><h2>Eventi</h2></div>
+        <ul class="events" id="events"></ul>
+      </section>
+    </div>
+  </div>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const fmtTime = t => new Date(t).toLocaleTimeString('it-IT', { hour12: false }) + '.' + String(new Date(t).getMilliseconds()).padStart(3, '0');
+const n = v => Number(v ?? 0).toLocaleString('it-IT');
+let state = null, settingsDirty = false, scenarioResults = {}, toastTimer;
+
+function toast(msg) {
+  const t = $('toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 3500);
+}
+
+async function call(path, body) {
+  const opt = { method: 'POST', headers: {} };
+  if (body !== undefined) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
+  const r = await fetch(path, opt);
+  let data = null; try { data = await r.json(); } catch { }
+  if (!r.ok) { toast(data?.error ?? `Errore ${r.status}`); throw new Error(data?.error ?? r.status); }
+  if (data?.message) toast(data.message);
+  return data;
+}
+
+function statusClass(s) { return s >= 200 && s < 300 ? 'ok' : s >= 400 && s < 500 ? 'warn' : 'err'; }
+
+// ---------------------------------------------------------------- nodi
+function roleChip(nd) {
+  if (nd.paused) return '<span class="chip warn">in pausa</span>';
+  if (!nd.reachable) return `<span class="chip err">${nd.killedBySimulator ? 'terminato' : 'non raggiungibile'}</span>`;
+  if (nd.role === 'Leader') return '<span class="chip leader"><span class="dot"></span>Leader</span>';
+  return `<span class="chip">${esc(nd.role)}</span>`;
+}
+
+function renderNodes() {
+  const el = $('nodes');
+  if (!state.nodes.length) {
+    el.innerHTML = `<div class="empty">Nessun nodo trovato su ${esc(state.scanned.length)} indirizzi.<br>Avviare il cluster da Visual Studio (profilo <b>Cluster 3 nodi</b> o il profilo multiplo <b>Cluster + Simulatore</b>).</div>`;
+    return;
+  }
+  el.innerHTML = state.nodes.map(nd => {
+    const leader = state.nodes.find(x => x.nodeId === nd.leaderId);
+    return `<div class="node ${nd.reachable && nd.role === 'Leader' ? 'is-leader' : ''} ${nd.reachable ? '' : 'down'}">
+      <div class="node-h"><b>${esc(nd.shortId)}</b>${nd.isDevParent ? '<span class="chip" title="Nodo 1, sotto debugger">debug</span>' : ''}<span class="spacer"></span>${roleChip(nd)}</div>
+      <dl class="kv">
+        <dt>URL</dt><dd>${esc(nd.url)}</dd>
+        <dt>Term</dt><dd>${n(nd.term)}</dd>
+        <dt>Commit / applied</dt><dd>${n(nd.commitIndex)} / ${n(nd.lastApplied)}</dd>
+        <dt>Log (snapshot)</dt><dd>${n(nd.lastLogIndex)} (${n(nd.snapshotIndex)})</dd>
+        <dt>Leader noto</dt><dd>${esc(leader ? leader.shortId : (nd.leaderId ? nd.leaderId.slice(0, 8) : '—'))}</dd>
+        <dt>Ready</dt><dd title="${esc(nd.readyReason)}">${nd.reachable ? (nd.ready ? 'sì' : 'no') + (nd.readyReason ? ' · ' + esc(nd.readyReason) : '') : '—'}</dd>
+        ${!nd.healthy && nd.reachable ? `<dt>Storage</dt><dd style="color:var(--err)" title="${esc(nd.unhealthyReason)}">${esc(nd.unhealthyReason ?? 'non sano')}</dd>` : ''}
+        ${nd.reachable && nd.role === 'Leader' && !nd.stateMachineHealthy ? `<dt>State machine</dt><dd style="color:var(--err)" title="${esc(nd.stateMachineError)}">${esc(nd.stateMachineError ?? 'non disponibile')}</dd>` : ''}
+        <dt>PID</dt><dd>${nd.pid ?? '—'}${nd.reachable ? '' : ` · visto ${Math.round(nd.lastSeenAgoMs / 1000)} s fa`}</dd>
+      </dl>
+      <div class="actions">
+        <button class="small danger" data-act="kill" data-node="${nd.nodeId}" ${nd.reachable || nd.paused ? '' : 'disabled'}>Kill</button>
+        ${nd.paused
+          ? `<button class="small" data-act="resume" data-node="${nd.nodeId}">Riprendi</button>`
+          : `<button class="small" data-act="pause" data-node="${nd.nodeId}" ${nd.reachable ? '' : 'disabled'}>Pausa</button>`}
+        <button class="small" data-act="restart" data-node="${nd.nodeId}" ${nd.canRestart ? '' : 'disabled'} title="${nd.isDevParent ? 'Il nodo 1 si riavvia con F5' : 'Rilancia il processo con la stessa riga di comando'}">Riavvia</button>
+        <button class="small" data-act="target" data-node="${nd.nodeId}" ${nd.reachable ? '' : 'disabled'} title="Invia solo a questo nodo">Invia qui</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+$('nodes').addEventListener('click', async e => {
+  const b = e.target.closest('button[data-act]'); if (!b) return;
+  const id = b.dataset.node, act = b.dataset.act;
+  const nd = state.nodes.find(x => x.nodeId === id);
+  if (act === 'target') { ensureTargetOption(id); $('target').value = id; settingsDirty = true; await pushSettings(); return; }
+  if (act === 'kill' && nd?.isDevParent && !confirm('È il nodo 1, sotto debugger: terminandolo si chiudono anche gli altri nodi e la sessione di debug. Continuare?')) return;
+  const q = act === 'pause' ? `?seconds=${$('pauseSec').value}` : '';
+  await call(`/sim/nodes/${id}/${act}${q}`).catch(() => { });
+  refresh();
+});
+
+$('killLeader').onclick = async () => {
+  const l = state?.nodes.find(x => x.nodeId === state.leaderId);
+  if (l?.isDevParent && !confirm('Il Leader è il nodo 1, sotto debugger: terminandolo si chiudono anche gli altri nodi. Per un failover con il cluster attivo usare la pausa, oppure attendere che il Leader sia un altro nodo. Continuare?')) return;
+  await call('/sim/leader/kill').catch(() => { }); refresh();
+};
+$('pauseLeader').onclick = async () => { await call(`/sim/leader/pause?seconds=${$('pauseSec').value}`).catch(() => { }); refresh(); };
+
+// ---------------------------------------------------------------- generatore
+function ensureTargetOption(id) {
+  if ([...$('target').options].some(o => o.value === id)) return;
+  const o = document.createElement('option'); o.value = id; o.textContent = 'nodo ' + id.slice(0, 8); $('target').appendChild(o);
+}
+
+function renderTargets() {
+  const sel = $('target'), current = sel.value || state.generator.settings.target;
+  const opts = [['RoundRobin', 'tutti a rotazione'], ['Leader', 'solo il Leader'], ['Follower', 'solo i Follower (inoltro)']]
+    .concat(state.nodes.map(nd => [nd.nodeId, `nodo ${nd.shortId} · porta ${nd.port}`]));
+  const sig = opts.map(o => o.join('=')).join('|');
+  if (sel.dataset.sig !== sig) {
+    sel.innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('');
+    sel.dataset.sig = sig;
+  }
+  sel.value = current;
+  if (sel.value !== current) { ensureTargetOption(current); sel.value = current; }
+}
+
+function readSettings() {
+  return { intervalMs: Number($('interval').value) || 200, target: $('target').value || 'RoundRobin', padBytes: Number($('pad').value) || 0 };
+}
+async function pushSettings() { await call('/sim/generator/settings', readSettings()).catch(() => { }); settingsDirty = false; }
+['interval', 'pad'].forEach(id => $(id).addEventListener('input', () => settingsDirty = true));
+['interval', 'pad', 'target'].forEach(id => $(id).addEventListener('change', pushSettings));
+
+$('startStop').onclick = async () => {
+  if (state.generator.running) await call('/sim/generator/stop');
+  else await call('/sim/generator/start', readSettings());
+  settingsDirty = false; refresh();
+};
+$('sendOne').onclick = async () => {
+  await pushSettings();
+  const r = await call('/sim/generator/one').catch(() => null);
+  if (r) toast(`#${r.seq}: ${r.outcome} (${r.finalStatus || 'rete'}) in ${r.latencyMs} ms · ${r.path}`);
+  refresh();
+};
+$('burst').onclick = async () => { await pushSettings(); await call(`/sim/generator/burst?count=${$('burstN').value}`).catch(() => { }); };
+$('reset').onclick = async () => { await call('/sim/generator/reset'); refresh(); };
+
+function renderGenerator() {
+  const g = state.generator, c = g.counters;
+  $('startStop').textContent = g.running ? 'Ferma' : 'Avvia';
+  $('startStop').className = g.running ? 'danger solid' : 'primary';
+  $('genChip').className = 'chip ' + (g.running ? 'ok' : '');
+  $('genChip').innerHTML = g.running ? `<span class="dot"></span>in invio · ogni ${g.settings.intervalMs} ms · ${esc(g.targetLabel)}` : 'fermo';
+  if (!settingsDirty && document.activeElement !== $('interval') && document.activeElement !== $('pad')) {
+    $('interval').value = g.settings.intervalMs; $('pad').value = g.settings.padBytes;
+  }
+  const tiles = [
+    ['Inviate', c.sent, ''], ['200', c.ok, 'ok'], ['200 dopo retry', c.okAfterRetry, c.okAfterRetry ? 'warn' : 'ok'],
+    ['Rifiutate (4xx)', c.rejected, c.rejected ? 'err' : ''], ['Abbandonate', c.gaveUp, c.gaveUp ? 'err' : ''],
+    ['In corso', c.inFlight, ''], ['Ritenti', c.retries, c.retries ? 'warn' : ''], ['Replay', c.replays, ''],
+    ['p50 ms', g.latency.p50, ''], ['p95 ms', g.latency.p95, g.latency.p95 > 100 ? 'warn' : ''], ['max ms', g.latency.max, '']
+  ];
+  if (c.skipped) tiles.push(['Saltate (limite)', c.skipped, 'warn']);
+  $('tiles').innerHTML = tiles.map(([l, v, cls]) => `<div class="tile ${cls}"><div class="v">${n(v)}</div><div class="l">${l}</div></div>`).join('');
+
+  $('failovers').innerHTML = (g.pendingFault ? `<b>In misura:</b> ${esc(g.pendingFault.description)} — in attesa del primo 200…<br>` : '')
+    + (g.failovers.length ? '<b>Failover misurati</b> (dal guasto al primo 200 di un\'operazione nuova): '
+      + g.failovers.slice(0, 6).map(f => `<span class="chip ${f.firstOkAfterMs <= 3000 ? 'ok' : 'warn'}">${n(f.firstOkAfterMs)} ms</span>`).join(' ') : '');
+
+  $('ops').innerHTML = g.recent.map(o => {
+    const cls = o.outcome === 'Ok' ? 'ok' : o.outcome === 'OkDopoRetry' ? 'warn' : o.outcome === 'InCorso' ? '' : 'err';
+    const label = { Ok: '200', OkDopoRetry: '200 dopo retry', Rifiutata: String(o.finalStatus), Abbandonata: 'abbandonata', InCorso: 'in corso' }[o.outcome];
+    return `<tr><td class="num">${o.seq}</td><td class="mono">${fmtTime(o.startedAt)}</td><td class="mono" title="${o.requestId}">${o.id}</td>
+      <td class="st ${cls}" title="${esc(o.error)}">${label}${o.replay ? ' ↺' : ''}</td><td class="mono">${esc(o.path)}</td><td class="num">${n(o.latencyMs)}</td></tr>`;
+  }).join('');
+  drawChart(g.series);
+}
+
+function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function drawChart(series) {
+  const cv = $('chart'), dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== w * dpr || cv.height !== h * dpr) { cv.width = w * dpr; cv.height = h * dpr; }
+  const ctx = cv.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
+  const totals = series.map(s => s[0] + s[1] + s[2] + s[3]);
+  const max = Math.max(4, ...totals, ...series.map(s => s[4]));
+  const pad = { l: 30, r: 6, t: 8, b: 16 }, cw = w - pad.l - pad.r, ch = h - pad.t - pad.b, bw = cw / series.length;
+  ctx.font = '11px system-ui'; ctx.fillStyle = css('--muted'); ctx.strokeStyle = css('--line'); ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.t + ch - ch * i / 4;
+    ctx.beginPath(); ctx.moveTo(pad.l, y + .5); ctx.lineTo(w - pad.r, y + .5); ctx.stroke();
+    ctx.fillText(String(Math.round(max * i / 4)), 2, y + 4);
+  }
+  ctx.fillText('-120 s', pad.l, h - 2); ctx.fillText('ora', w - pad.r - 18, h - 2);
+  const colors = [css('--c-ok'), css('--c-retry'), css('--c-rej'), css('--c-gave')];
+  series.forEach((s, i) => {
+    let y = pad.t + ch;
+    for (let k = 0; k < 4; k++) {
+      if (!s[k]) continue;
+      const bh = ch * s[k] / max; y -= bh;
+      ctx.fillStyle = colors[k]; ctx.fillRect(pad.l + i * bw + .5, y, Math.max(1, bw - 1), bh);
+    }
+  });
+  ctx.strokeStyle = css('--c-line'); ctx.lineWidth = 1.5; ctx.beginPath();
+  series.forEach((s, i) => { const x = pad.l + i * bw + bw / 2, y = pad.t + ch - ch * s[4] / max; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+  ctx.stroke();
+}
+
+// ---------------------------------------------------------------- scenari
+function renderScenarios() {
+  const el = $('scenarios');
+  if (el.dataset.ready !== '1') {
+    el.innerHTML = state.scenarios.map(s => `<div class="scen" id="scen-${s.id}">
+      <div><h3>${esc(s.title)}</h3><div class="exp">Atteso: ${esc(s.expected)}</div><div class="spec">${esc(s.spec)}</div></div>
+      <button class="small" data-scen="${s.id}">Esegui</button>
+      <div class="res" hidden></div></div>`).join('');
+    el.dataset.ready = '1';
+  }
+  for (const r of [...state.scenarioHistory].reverse()) if (!scenarioResults[r.id] || scenarioResults[r.id].at < r.at) scenarioResults[r.id] = r;
+  for (const [id, r] of Object.entries(scenarioResults)) {
+    const box = document.querySelector(`#scen-${id} .res`); if (!box) continue;
+    box.hidden = false; box.className = 'res ' + (r.passed ? 'pass' : 'fail');
+    box.innerHTML = `<span class="verdict">${r.passed ? '✓ superato' : '✕ non superato'}</span> · ${esc(r.summary)} <span class="muted">(${fmtTime(r.at)})</span>
+      <ol class="steps">${r.steps.map(s => `<li>${esc(s.label)} → porta ${s.port}: <span class="st ${statusClass(s.status)}">${s.status || 'rete'}</span>${s.replay ? ' replay' : ''} · ${s.ms} ms${s.note ? ' · ' + esc(String(s.note).slice(0, 120)) : ''}</li>`).join('')}</ol>`;
+  }
+}
+async function runScenario(id) {
+  const btn = document.querySelector(`button[data-scen="${id}"]`); if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  try { const r = await call(`/sim/scenarios/${id}`); scenarioResults[id] = r; renderScenarios(); }
+  catch { } finally { if (btn) { btn.disabled = false; btn.textContent = 'Esegui'; } }
+}
+$('scenarios').addEventListener('click', e => { const b = e.target.closest('button[data-scen]'); if (b) runScenario(b.dataset.scen); });
+$('runAll').onclick = async () => { for (const s of state.scenarios) await runScenario(s.id); };
+
+// ---------------------------------------------------------------- verifica
+$('verify').onclick = async () => {
+  $('verify').disabled = true;
+  try {
+    const r = await call('/sim/verify');
+    const out = $('verifyOut');
+    if (!r.available) { out.innerHTML = `<div class="big err">applied.log non disponibile</div><p>${esc(r.message)}</p><p class="mono">${esc(r.path)}</p>`; return; }
+    const list = (title, items, fmt) => items.length ? `<p><b>${title}</b></p><ul class="steps">${items.map(fmt).join('')}</ul>` : '';
+    out.innerHTML = `<div class="big ${r.passed ? 'ok' : 'err'}">${r.passed ? '✓' : '✕'} ${esc(r.summary)}</div>
+      <dl>
+        <dt>Operazioni di questa sessione</dt><dd>${n(r.run.completedOps)} completate · ${n(r.run.ok)} con 200 · ${n(r.run.rejected)} rifiutate · ${n(r.run.gaveUp)} abbandonate</dd>
+        <dt>Voci applicate della sessione</dt><dd>${n(r.run.appliedForRun)} (seq distinti ${n(r.run.distinctSeqApplied)})</dd>
+        <dt>applied.log</dt><dd>${n(r.totals.rows)} righe · ${n(r.totals.applied)} applicate · ${n(r.totals.duplicateDedup)} deduplicate · ${n(r.totals.noOp)} no-op · ultimo indice ${n(r.totals.lastLogIndex)}</dd>
+        <dt>Altri esiti</dt><dd>${n(r.totals.conflict)} conflitti · ${n(r.totals.rejected)} rifiutate · ${n(r.totals.expired)} scadute · ${n(r.totals.quarantined)} in quarantena</dd>
+        <dt>Indici non consecutivi</dt><dd>${n(r.totals.indexGaps)}</dd>
+        <dt>Abbandonate e non scritte</dt><dd>${n(r.failedNotWritten)}</dd>
+      </dl>
+      ${list('Seq scritti più volte (violazione)', r.duplicateSeq, d => `<li>seq ${d.seq}: indici ${d.logIndexes.join(', ')}</li>`)}
+      ${list('RequestId applicati più volte (violazione)', r.duplicateRequestIds, d => `<li>${esc(d.requestId)}: indici ${d.logIndexes.join(', ')}</li>`)}
+      ${list('Confermate con 200 ma assenti (violazione)', r.ackedMissing, d => `<li>seq ${d.seq} · ${esc(d.requestId)} · ${esc(d.path)}</li>`)}
+      ${list('Abbandonate dal client ma scritte (ammesso: REQ-API-3)', r.failedButWritten, d => `<li>seq ${d.seq} · ${esc(d.error)}</li>`)}
+      <p class="muted">Nodi: ${r.nodes.map(x => `${esc(x.shortId)} ${esc(x.role)} commit ${n(x.commitIndex)} / applied ${n(x.lastApplied)}`).join(' · ')}</p>`;
+  } catch { } finally { $('verify').disabled = false; }
+};
+
+// ---------------------------------------------------------------- ciclo
+function renderHeader() {
+  const l = state.nodes.find(x => x.nodeId === state.leaderId);
+  const up = state.nodes.filter(x => x.reachable).length;
+  $('leaderChip').className = 'chip ' + (l ? 'leader' : state.nodes.length ? 'err' : '');
+  $('leaderChip').innerHTML = l ? `<span class="dot"></span>Leader ${esc(l.shortId)} · porta ${l.port} · term ${l.term}` : state.nodes.length ? 'nessun Leader' : 'in attesa dei nodi…';
+  $('runChip').textContent = 'runId ' + state.generator.runId.slice(0, 8);
+  $('scanInfo').textContent = `${up} di ${state.nodes.length} nodi raggiungibili · sondati ${state.scanned.length} indirizzi`;
+  $('appliedPath').textContent = state.appliedLog.path + (state.appliedLog.available ? '' : ' (non ancora presente)');
+}
+function renderEvents() {
+  $('events').innerHTML = state.events.map(e => `<li class="${e.level}"><time>${fmtTime(e.time)}</time><span>${esc(e.text)}</span></li>`).join('');
+}
+
+let busy = false;
+async function refresh() {
+  if (busy) return; busy = true;
+  try {
+    const r = await fetch('/sim/state'); state = await r.json();
+    $('connChip').className = 'chip ok'; $('connChip').textContent = '● simulatore connesso';
+    renderHeader(); renderTargets(); renderNodes(); renderGenerator(); renderScenarios(); renderEvents();
+  } catch {
+    $('connChip').className = 'chip err'; $('connChip').textContent = '● simulatore non raggiungibile';
+  } finally { busy = false; }
+}
+refresh(); setInterval(refresh, 700);
+window.addEventListener('resize', () => state && drawChart(state.generator.series));
+</script>
+</body>
+</html>

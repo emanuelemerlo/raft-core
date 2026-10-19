@@ -6,6 +6,13 @@ Il workflow di release usa la sezione della versione come note di rilascio.
 ## [Unreleased]
 
 ### Aggiunto
+- **Simulatore client** (`src/RaftCore.Simulator`): applicazione web di sviluppo su http://localhost:5100, avviabile con il cluster tramite il profilo multiplo **Cluster + Simulatore** (`RaftCore.slnLaunch`). Comprende:
+  - stato dei nodi;
+  - invio ciclico di JSON con `seq` progressivo e `timestamp`, con retry conforme al contratto client;
+  - raffiche;
+  - scenari di idempotenza ed errore (T4, T7, T9, T33, T34, T42);
+  - kill, pausa e riavvio dei processi dei nodi, con misura del tempo di failover;
+  - verifica di `applied.log`: nessun duplicato, nessun 200 senza scrittura.
 - **Cluster di sviluppo con un solo avvio**:
   - in ambiente Development con `DevCluster:Instances` > 1, il processo avviato (es. F5 in Visual Studio, l'unico in debug) è il nodo 1 e lancia gli altri membri come processi figli;
   - i figli si aprono in una finestra console per nodo su Windows, oppure con l'output prefissato;
