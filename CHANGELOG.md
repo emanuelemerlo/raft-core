@@ -29,6 +29,10 @@ Il workflow di release usa la sezione della versione come note di rilascio.
 - Un segreto `dev-only-…` viene rifiutato fuori dall'ambiente Development.
 - Log della console senza gli scope di tracing (`SpanId`/`TraceId`).
 
+### Corretto
+- **Failover lento su Windows dopo la caduta del Leader.** Il candidato aspettava la risposta di *tutti* i membri, compreso quello spento, sia nel PreVote sia nel voto. Su Windows una connessione verso una porta chiusa arriva al timeout invece di essere rifiutata subito. I round si allungavano e due nodi si candidavano insieme: si osservavano più voti contesi in serie e un failover oltre i 7 s. Ora il candidato procede appena raggiunge il quorum: nello scenario di prova il failover è passato da 1,3-1,5 s a 0,6-0,9 s.
+- Test: metriche degli errori transitori sommate su tutti i nodi, perché la leadership può cambiare durante il test; test del failover con le RPC verso il nodo spento appese fino al timeout.
+
 ## [0.2.0] - 2026-10-19
 
 Prima versione orientata alla produzione su SQL Server condiviso. **Contiene modifiche incompatibili** con la configurazione e lo storage della 0.1 (vedi "Migrazione").

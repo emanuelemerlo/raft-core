@@ -32,6 +32,7 @@
 - **PreVote obbligatorio**: un nodo isolato non incrementa il term e non disturba il cluster al rientro.
 - **Leader stickiness**: un nodo che ha sentito il Leader negli ultimi `ElectionTimeoutMinMs` nega PreVote e voto.
 - **Lease**: il Leader smette di scrivere se un quorum non ha confermato messaggi inviati negli ultimi `LeaderLeaseMs`, con `LeaderLeaseMs < ElectionTimeoutMinMs`.
+- **Quorum senza attese inutili**: PreVote e voto procedono appena è raggiunto il quorum, senza attendere i membri lenti o spenti. Le risposte tardive vengono comunque elaborate, ad esempio per osservare un term più alto. Così un nodo spento, che su Windows non rifiuta la connessione ma la lascia scadere, non allunga i round di elezione, e due candidature simultanee diventano improbabili.
 
 ## Indirizzi e identità
 
