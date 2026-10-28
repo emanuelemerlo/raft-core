@@ -1,0 +1,27 @@
+# Aggiornamenti automatici delle dipendenze.
+# Tiene aggiornate le GitHub Action pinnate al SHA (altrimenti il pin le congela, patch di sicurezza comprese),
+# i pacchetti NuGet e l'immagine base del container. Raggruppa gli aggiornamenti minori/patch per ridurre il rumore.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns: [ "*" ]
+        update-types: [ "minor", "patch" ]
+
+  - package-ecosystem: "nuget"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      nuget-minor-patch:
+        update-types: [ "minor", "patch" ]
+
+  - package-ecosystem: "docker"
+    directory: "/deploy/docker"
+    schedule:
+      interval: "weekly"
