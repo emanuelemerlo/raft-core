@@ -25,19 +25,19 @@ da feed non previsti, incluse le dipendenze transitive.
 
 - **Impatto operativo:** nessuno, se si usa già nuget.org. Un feed privato andrebbe aggiunto qui esplicitamente.
 
-### 4. Generazione dei lockfile (`Directory.Build.props`)
-`RestorePackagesWithLockFile=true`: ogni `dotnet restore` genera/aggiorna i `packages.lock.json`, fissando
-anche le versioni transitive.
+### 4. Lockfile NuGet e restore bloccato — RINVIATI PER SCELTA
+Un restore bloccato (`packages.lock.json` committati + `dotnet restore --locked-mode`) renderebbe la build
+riproducibile e farebbe fallire la CI su qualsiasi deriva delle dipendenze, incluse le transitive.
 
-- **Impatto operativo:** ogni cambio di dipendenza voluto rigenera il lockfile.
-- **FOLLOW-UP MANUALE (serve il .NET SDK):**
-  1. `dotnet restore RaftCore.sln` per generare i `packages.lock.json`.
-  2. Committare i file generati (uno per progetto).
-  3. Abilitare il restore bloccato togliendo il commento in `ci.yml` (step *Restore*): `dotnet restore RaftCore.sln --locked-mode`.
-     Da quel momento la build **fallisce** su qualsiasi deriva delle dipendenze rispetto al lockfile.
+**Non è attivo**, e la scelta è deliberata: questo è un progetto di ricerca in continua modifica e test, non
+ancora destinato alla produzione. Con il locked-mode ogni cambio di dipendenza non riconciliato romperebbe la
+CI, un attrito non giustificato in questa fase. I `packages.lock.json` sono quindi in `.gitignore` e non versionati.
 
-  > Questo step è lasciato manuale di proposito: i lockfile contengono gli hash dei pacchetti risolti e vanno
-  > generati da un restore reale, non scritti a mano.
+- **Oggi:** restano attivi la sorgente NuGet fissata (§3) e Dependabot, che coprono il grosso del rischio supply chain.
+- **Quando si andrà verso la produzione**, abilitarlo è un intervento piccolo:
+  1. `dotnet restore RaftCore.sln` per generare i `packages.lock.json` (vanno generati da un restore reale: contengono gli hash dei pacchetti).
+  2. Toglierli da `.gitignore` e committarli (uno per progetto).
+  3. In `ci.yml` (step *Restore*) togliere il commento per usare `dotnet restore RaftCore.sln --locked-mode`; valutare lo stesso per il `restore` del `Dockerfile`.
 
 ### 5. Endpoint informativi ristretti a loopback
 `GET /api/v1/cluster/status` e `/api/v1/metrics` rispondono con **403** se la richiesta non proviene da loopback,

@@ -8,8 +8,5 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <Deterministic>true</Deterministic>
-    <!-- Genera/aggiorna i packages.lock.json a ogni restore: fissa anche le dipendenze transitive.
-         Una volta committati i lockfile, abilitare il restore bloccato (docs/security-hardening.md). -->
-    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
 </Project>
