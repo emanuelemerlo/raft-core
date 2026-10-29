@@ -1,5 +1,5 @@
 # Immagine RaftCore (linux/amd64, linux/arm64)
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 ARG VERSION=0.0.0-dev
 WORKDIR /src
 COPY Directory.Build.props global.json ./
