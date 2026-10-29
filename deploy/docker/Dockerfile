@@ -9,7 +9,7 @@ RUN dotnet restore src/RaftCore/RaftCore.csproj
 COPY src/ src/
 RUN dotnet publish src/RaftCore/RaftCore.csproj -c Release -o /app --no-restore -p:Version=${VERSION}
 
-FROM mcr.microsoft.com/dotnet/aspnet:8.0
+FROM mcr.microsoft.com/dotnet/aspnet:10.0
 WORKDIR /app
 COPY --from=build /app .
 # Dati locali del nodo (WAL e stato Raft): montare un volume persistente per nodo
