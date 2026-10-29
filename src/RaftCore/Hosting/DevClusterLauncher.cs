@@ -34,6 +34,11 @@ public sealed class DevClusterLauncher : IDisposable
 
         var launcher = new DevClusterLauncher(log);
         string mode = ResolveOutputMode(cfg.DevCluster.ChildOutput);
+        // Visual Studio inietta ASPNETCORE_HOSTINGSTARTUPASSEMBLIES=Microsoft.WebTools.ApiEndpointDiscovery nel
+        // processo in debug (il nodo 1). I nodi figli ereditano questo ambiente ma non riescono a caricare
+        // quell'assembly e registrano un'eccezione critica, innocua ma rumorosa, all'avvio. L'host del nodo 1
+        // è già costruito a questo punto: azzerarla ora non lo tocca e impedisce ai figli di ereditarla.
+        Environment.SetEnvironmentVariable("ASPNETCORE_HOSTINGSTARTUPASSEMBLIES", null);
         int k = 1;
         foreach (var id in others)
         {
