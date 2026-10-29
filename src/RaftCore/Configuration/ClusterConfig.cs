@@ -102,6 +102,18 @@ public class StateMachineConfig
 }
 
 /// <summary>Configurazione baseline (spec §18). Sezione "RaftCluster".</summary>
+/// <summary>Sezione "Management": esposizione degli endpoint informativi.</summary>
+public class ManagementConfig
+{
+    /// <summary>
+    /// Se false (default), GET /api/v1/cluster/status e /api/v1/metrics rispondono solo a chiamanti su loopback;
+    /// le richieste da altri indirizzi ricevono 403. Metterlo a true solo quando l'accesso è già ristretto a monte
+    /// (rete di gestione, reverse proxy o firewall). Gli endpoint /health/* non sono interessati.
+    /// Dietro un reverse proxy l'indirizzo visto è quello del proxy: in quel caso serve comunque true.
+    /// </summary>
+    public bool ExposeStatusEndpoints { get; set; } = false;
+}
+
 public class ClusterConfig
 {
     public const long MaxBodyBytesLimit = 64L * 1024 * 1024;
@@ -156,6 +168,7 @@ public class ClusterConfig
     public StorageConfig Storage { get; set; } = new();
     public LogConfig Log { get; set; } = new();
     public StateMachineConfig StateMachine { get; set; } = new();
+    public ManagementConfig Management { get; set; } = new();
 
     /// <summary>Solo test: abilita FsyncOnCommit=false e la fault injection su file.</summary>
     public bool TestMode { get; set; } = false;

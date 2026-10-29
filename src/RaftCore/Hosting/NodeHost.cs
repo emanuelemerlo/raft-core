@@ -217,6 +217,19 @@ public static class NodeHost
         return false;
     }
 
+    /// <summary>
+    /// true se il chiamante può vedere gli endpoint informativi: o sono esposti esplicitamente in configurazione,
+    /// o la richiesta proviene da loopback. Gestisce anche gli indirizzi IPv4 mappati su IPv6 (::ffff:127.0.0.1).
+    /// </summary>
+    private static bool ManagementAllowed(HttpContext ctx, ClusterConfig cfg)
+    {
+        if (cfg.Management.ExposeStatusEndpoints) return true;
+        var ip = ctx.Connection.RemoteIpAddress;
+        if (ip is null) return false;
+        if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
+        return System.Net.IPAddress.IsLoopback(ip);
+    }
+
     private static void MapEndpoints(WebApplication app)
     {
         app.UseMiddleware<SecurityMiddleware>();
@@ -228,8 +241,12 @@ public static class NodeHost
             var (ready, reason) = n.GetReadiness();
             return Results.Json(new { ready, reason }, statusCode: ready ? 200 : 503);
         });
-        app.MapGet("/api/v1/cluster/status", (RaftNode n) => Results.Json(n.GetStatus()));
-        app.MapGet("/api/v1/metrics", (RaftNode n) => Results.Json(n.GetMetrics()));
+        // Endpoint informativi: espongono topologia e metriche. Per default raggiungibili solo da loopback
+        // (Management:ExposeStatusEndpoints per aprirli quando l'accesso è già ristretto a monte).
+        app.MapGet("/api/v1/cluster/status", (HttpContext ctx, RaftNode n, ClusterConfig cfg) =>
+            ManagementAllowed(ctx, cfg) ? Results.Json(n.GetStatus()) : Results.StatusCode(403));
+        app.MapGet("/api/v1/metrics", (HttpContext ctx, RaftNode n, ClusterConfig cfg) =>
+            ManagementAllowed(ctx, cfg) ? Results.Json(n.GetMetrics()) : Results.StatusCode(403));
 
         // ---- RPC interne (autenticate e firmate dal SecurityMiddleware)
         app.MapPost("/internal/v1/prevote", (PreVoteRequest r, RaftNode n) => Results.Json(n.HandlePreVote(r)));

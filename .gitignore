@@ -3,6 +3,8 @@ bin/
 obj/
 artifacts/
 publish/
+# Lockfile NuGet: non versionati (progetto di ricerca; restore bloccato rinviato, vedi docs/security-hardening.md)
+packages.lock.json
 *.user
 *.suo
 .vs/

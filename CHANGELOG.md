@@ -24,14 +24,24 @@ Il workflow di release usa la sezione della versione come note di rilascio.
   - l'identità di chi risponde è verificata dalla firma;
   - le istanze si trovano anche con porte dinamiche e senza UDP, e un nodo riavviato su un'altra porta viene ritrovato.
 - Metriche `probeRounds` e `probeFound`.
+- **Hardening supply chain e configurazione** (branch `security/harden-ci-config`):
+  - GitHub Action pinnate al commit SHA in tutti i workflow (ci, release, wiki);
+  - **Dependabot** per NuGet, GitHub Action e immagine del container, che mantiene aggiornati i pin;
+  - sorgente NuGet fissata alla sola `nuget.org` con package source mapping (`NuGet.config`), contro la dependency confusion;
+  - endpoint informativi `GET /api/v1/cluster/status` e `/api/v1/metrics` ristretti a loopback per default, con il flag `RaftCluster:Management:ExposeStatusEndpoints` (default `false`; `true` in `appsettings.Development.json`); gli endpoint `/health/*` non cambiano;
+  - `deploy/docker/.env.example` e `docs/security-hardening.md` (impatto operativo e follow-up).
+  - *Nota:* il restore bloccato dei lockfile NuGet è rinviato per scelta (progetto di ricerca); restano attivi sorgente fissata e Dependabot.
 
 ### Modificato
 - Un segreto `dev-only-…` viene rifiutato fuori dall'ambiente Development.
 - Log della console senza gli scope di tracing (`SpanId`/`TraceId`).
+- **Connessione SQL di produzione** (`deploy/systemd/raftcore.env.example`): `Encrypt=True;TrustServerCertificate=False` (connessione cifrata e certificato del server validato).
+- **docker-compose**: rimossi i valori di default di `CLUSTER_SECRET` e `SA_PASSWORD`; ora obbligatori, l'avvio fallisce con un messaggio chiaro se mancano.
 
 ### Corretto
 - **Failover lento su Windows dopo la caduta del Leader.** Il candidato aspettava la risposta di *tutti* i membri, compreso quello spento, sia nel PreVote sia nel voto. Su Windows una connessione verso una porta chiusa arriva al timeout invece di essere rifiutata subito. I round si allungavano e due nodi si candidavano insieme: si osservavano più voti contesi in serie e un failover oltre i 7 s. Ora il candidato procede appena raggiunge il quorum: nello scenario di prova il failover è passato da 1,3-1,5 s a 0,6-0,9 s.
 - Test: metriche degli errori transitori sommate su tutti i nodi, perché la leadership può cambiare durante il test; test del failover con le RPC verso il nodo spento appese fino al timeout.
+- **Eccezione critica all'avvio dei nodi figli del cluster di sviluppo.** Visual Studio inietta `ASPNETCORE_HOSTINGSTARTUPASSEMBLIES` nel processo in debug (nodo 1); i nodi figli ereditavano l'ambiente ma non riuscivano a caricare quell'assembly, registrando un'eccezione `crit` innocua ma rumorosa. `DevClusterLauncher` ora azzera la variabile prima di generare i figli.
 
 ## [0.2.0] - 2026-10-19
 
