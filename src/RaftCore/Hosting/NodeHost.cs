@@ -167,15 +167,25 @@ public static class NodeHost
                     sp.GetService<ISqlPayloadWriter>()),
                 _ => new SharedFileDataRepository(config.StateMachine.SharedFile, config.Storage.FsyncOnCommit)
             });
-            builder.Services.AddHttpClient("raft-rpc").ConfigureHttpClient(c => c.Timeout = Timeout.InfiniteTimeSpan);
-            builder.Services.AddHttpClient("forward").ConfigureHttpClient(c => c.Timeout = Timeout.InfiniteTimeSpan);
+            // ConnectTimeout corto sui client RPC: verso un peer irraggiungibile (nodo giù) la sola connessione
+            // fallisce subito, senza occupare la RPC fino al suo timeout. Accorcia e stabilizza il failover.
+            // I timeout complessivi restano per-chiamata (CancelAfter nel transport), quindi Timeout resta infinito.
+            var rpcConnectTimeout = TimeSpan.FromMilliseconds(config.RpcConnectTimeoutMs);
+            builder.Services.AddHttpClient("raft-rpc")
+                .ConfigureHttpClient(c => c.Timeout = Timeout.InfiniteTimeSpan)
+                .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { ConnectTimeout = rpcConnectTimeout });
+            builder.Services.AddHttpClient("forward")
+                .ConfigureHttpClient(c => c.Timeout = Timeout.InfiniteTimeSpan)
+                .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { ConnectTimeout = rpcConnectTimeout });
             builder.Services.AddSingleton<IPeerTransport, HttpPeerTransport>();
             builder.Services.AddSingleton<IUdpChannel>(_ => config.UdpMode == UdpMode.Disabled ? new NullUdpChannel() : new UdpChannel(config));
             builder.Services.AddSingleton<RaftNode>();
             builder.Services.AddHostedService(sp => sp.GetRequiredService<RaftNode>());
             builder.Services.AddSingleton<UdpDiscoveryService>();
             builder.Services.AddHostedService(sp => sp.GetRequiredService<UdpDiscoveryService>());
-            builder.Services.AddHttpClient("probe").ConfigureHttpClient(c => c.Timeout = Timeout.InfiniteTimeSpan);
+            builder.Services.AddHttpClient("probe")
+                .ConfigureHttpClient(c => c.Timeout = Timeout.InfiniteTimeSpan)
+                .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { ConnectTimeout = rpcConnectTimeout });
             builder.Services.AddSingleton<PeerProbeService>();
             builder.Services.AddHostedService(sp => sp.GetRequiredService<PeerProbeService>());
             builder.Services.AddSingleton<ClientApi>();
