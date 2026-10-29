@@ -155,6 +155,13 @@ public class ClusterConfig
     public int ElectionTimeoutMaxMs { get; set; } = 1800;
     public int LeaderLeaseMs { get; set; } = 750;
     public int ReplicationTimeoutMs { get; set; } = 1500;
+    /// <summary>
+    /// Timeout della sola connessione (TCP) verso un peer. Superato, il tentativo fallisce e il nodo è trattato
+    /// come irraggiungibile senza attendere il timeout dell'intera RPC: tiene corto e stabile il failover quando
+    /// un nodo è giù. Vale solo per connessioni nuove, non per quelle riusate dal pool keep-alive (su localhost una
+    /// connessione viva richiede meno di un ms). Tenere ben sotto ReplicationTimeoutMs.
+    /// </summary>
+    public int RpcConnectTimeoutMs { get; set; } = 250;
     public int FailoverWaitMs { get; set; } = 8000;
     public int RequestDeadlineMs { get; set; } = 10000;
     public long MaxBodyBytes { get; set; } = 1_048_576;
@@ -262,6 +269,8 @@ public class ClusterConfig
             v.Add($"LeaderLeaseMs ({LeaderLeaseMs}) < ElectionTimeoutMinMs ({ElectionTimeoutMinMs}) violato.");
         if (ReplicationTimeoutMs >= RequestDeadlineMs)
             v.Add("ReplicationTimeoutMs < RequestDeadlineMs violato.");
+        if (RpcConnectTimeoutMs < 20 || RpcConnectTimeoutMs >= ReplicationTimeoutMs)
+            v.Add($"RpcConnectTimeoutMs ({RpcConnectTimeoutMs}) deve essere >= 20 e < ReplicationTimeoutMs ({ReplicationTimeoutMs}).");
         if (FailoverWaitMs >= RequestDeadlineMs)
             v.Add("FailoverWaitMs < RequestDeadlineMs violato.");
         if (AnnounceTimeoutMs < 3 * AnnounceIntervalMs)
