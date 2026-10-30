@@ -21,9 +21,11 @@ updates:
       nuget-minor-patch:
         update-types: [ "minor", "patch" ]
     ignore:
-      # Le Microsoft.Extensions.Hosting.* restano allineate al target framework (net8.0 -> serie 8.0.x).
+      # Pacchetti della famiglia runtime (.NET): restano allineati al target framework (net8.0 -> serie 8.0.x).
       # I major (es. 10.x) vanno valutati insieme a un cambio di TFM, non proposti da Dependabot.
       - dependency-name: "Microsoft.Extensions.Hosting.*"
+        update-types: [ "version-update:semver-major" ]
+      - dependency-name: "System.Management"
         update-types: [ "version-update:semver-major" ]
 
   - package-ecosystem: "docker"
