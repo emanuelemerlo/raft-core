@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
-using System.Text.Json;
 
 namespace RaftCore.Simulator.Services;
 
@@ -9,7 +8,7 @@ public enum OpOutcome { InCorso, Ok, OkDopoRetry, Rifiutata, Abbandonata }
 
 public sealed record Attempt(int Port, int Status, long Ms, string? Error);
 
-/// <summary>Un'operazione logica: un RequestId, un body, uno o più tentativi (REQ-CLI-1).</summary>
+/// <summary>Un'operazione logica: un RequestId, un endpoint, un body, uno o più tentativi (REQ-CLI-1).</summary>
 public sealed class OpRecord
 {
     public long Seq { get; init; }
@@ -35,30 +34,66 @@ public sealed class GeneratorSettings
     public string Target { get; set; } = "RoundRobin";
     /// <summary>Byte di riempimento aggiunti al JSON (campo "pad") per simulare payload più grandi.</summary>
     public int PadBytes { get; set; }
-    /// <summary>Nome dell'endpoint; vuoto = tutti gli endpoint del cluster a rotazione.</summary>
-    public string Endpoint { get; set; } = "";
+    /// <summary>Peso di ogni endpoint (0 = escluso, massimo 100). Un endpoint non elencato ha peso 1.</summary>
+    public Dictionary<string, int> EndpointWeights { get; set; } = new();
+}
+
+/// <summary>Contatori, latenze e serie per secondo: uno per il totale e uno per ogni endpoint.</summary>
+internal sealed class OpStats
+{
+    public const int BucketsKept = 180;
+    public long Ok, OkRetry, Rejected, GaveUp, Retries, Replays;
+    public readonly SortedDictionary<long, int[]> Buckets = new();   // secondo -> [ok, okDopoRetry, rifiutate, abbandonate, ritenti]
+    public readonly Queue<long> Latencies = new();
+
+    public void Bucket(long sec, int index)
+    {
+        if (!Buckets.TryGetValue(sec, out var b)) Buckets[sec] = b = new int[5];
+        b[index]++;
+        while (Buckets.Count > BucketsKept) Buckets.Remove(Buckets.Keys.First());
+    }
+
+    public void Latency(long ms)
+    {
+        Latencies.Enqueue(ms);
+        while (Latencies.Count > 2000) Latencies.Dequeue();
+    }
+
+    public object Counters(long? sent = null) => new { sent, ok = Ok, okAfterRetry = OkRetry, rejected = Rejected, gaveUp = GaveUp, retries = Retries, replays = Replays };
+
+    public object LatencySummary()
+    {
+        var lat = Latencies.OrderBy(x => x).ToArray();
+        long P(double q) => lat.Length == 0 ? 0 : lat[Math.Min(lat.Length - 1, (int)Math.Ceiling(q * lat.Length) - 1)];
+        return new { p50 = P(0.5), p95 = P(0.95), p99 = P(0.99), max = lat.Length == 0 ? 0 : lat[^1], samples = lat.Length };
+    }
+
+    public List<int[]> Series(long nowSec) => Enumerable.Range(0, 120).Select(i =>
+    {
+        var b = Buckets.TryGetValue(nowSec - 119 + i, out var v) ? v : new int[5];
+        return new[] { b[0], b[1], b[2], b[3], b[4] };
+    }).ToList();
 }
 
 /// <summary>
-/// Invio ciclico di JSON con timestamp e numero progressivo. Ogni operazione si comporta come un client conforme
-/// al contratto: RequestId generato una volta, stesso body byte per byte a ogni ritento, retry con backoff e jitter
-/// su errore di rete, 503 e 504, mai su 4xx; su errore di rete si prova un altro nodo.
+/// Invio ciclico su N endpoint. Ogni operazione sceglie un endpoint secondo i pesi configurati e invia il JSON del suo
+/// modello (<see cref="PayloadFactory"/>), con numero progressivo e timestamp. Si comporta come un client conforme al
+/// contratto: RequestId generato una volta, stesso endpoint e stesso body byte per byte a ogni ritento, retry con backoff e
+/// jitter su errore di rete, 503 e 504, mai su 4xx; su errore di rete si prova un altro nodo.
 /// </summary>
 public sealed class LoadGenerator : BackgroundService
 {
-    private const int Bucket = 1, BucketsKept = 180;
-
     private readonly SimulatorOptions _opt;
     private readonly DataClient _client;
     private readonly ClusterMonitor _monitor;
+    private readonly PayloadFactory _payloads;
     private readonly EventLog _events;
     private readonly object _l = new();
     private readonly ConcurrentDictionary<long, OpRecord> _ops = new();
     private readonly LinkedList<OpRecord> _recent = new();
-    private readonly SortedDictionary<long, int[]> _buckets = new();     // secondo -> [ok, okDopoRetry, rifiutate, abbandonate, ritenti]
-    private readonly Queue<long> _latencies = new();
+    private OpStats _total = new();
+    private readonly Dictionary<string, OpStats> _byEndpoint = new(StringComparer.Ordinal);
     private long _seq, _inFlight, _skipped;
-    private long _cntOk, _cntOkRetry, _cntRejected, _cntGaveUp, _cntRetries, _cntReplay;
     private volatile bool _running;
     private PendingFault? _fault;
     private readonly List<object> _faultResults = new();
@@ -67,10 +102,14 @@ public sealed class LoadGenerator : BackgroundService
     public GeneratorSettings Settings { get; private set; }
     public bool Running => _running;
 
-    public LoadGenerator(SimulatorOptions opt, DataClient client, ClusterMonitor monitor, EventLog events)
+    public LoadGenerator(SimulatorOptions opt, DataClient client, ClusterMonitor monitor, PayloadFactory payloads, EventLog events)
     {
-        _opt = opt; _client = client; _monitor = monitor; _events = events;
-        Settings = new GeneratorSettings { IntervalMs = opt.DefaultIntervalMs, Target = opt.DefaultTarget, Endpoint = opt.DefaultEndpoint };
+        _opt = opt; _client = client; _monitor = monitor; _payloads = payloads; _events = events;
+        Settings = new GeneratorSettings
+        {
+            IntervalMs = opt.DefaultIntervalMs, Target = opt.DefaultTarget,
+            EndpointWeights = new Dictionary<string, int>(opt.DefaultEndpointWeights, StringComparer.Ordinal)
+        };
     }
 
     public IReadOnlyCollection<OpRecord> AllOps => (IReadOnlyCollection<OpRecord>)_ops.Values;
@@ -81,7 +120,8 @@ public sealed class LoadGenerator : BackgroundService
         s.IntervalMs = Math.Clamp(s.IntervalMs, 5, 60_000);
         s.PadBytes = Math.Clamp(s.PadBytes, 0, _opt.MaxBodyBytes);
         if (string.IsNullOrWhiteSpace(s.Target)) s.Target = "RoundRobin";
-        s.Endpoint = s.Endpoint?.Trim() ?? "";
+        s.EndpointWeights = (s.EndpointWeights ?? new()).Where(kv => !string.IsNullOrWhiteSpace(kv.Key))
+            .ToDictionary(kv => kv.Key.Trim(), kv => Math.Clamp(kv.Value, 0, 100), StringComparer.Ordinal);
         Settings = s;
     }
 
@@ -89,7 +129,7 @@ public sealed class LoadGenerator : BackgroundService
     {
         if (_running) return;
         _running = true;
-        _events.Info($"Invio ciclico avviato: ogni {Settings.IntervalMs} ms, destinazione {TargetLabel(Settings.Target)}, {EndpointLabel(Settings.Endpoint)}");
+        _events.Info($"Invio ciclico avviato: ogni {Settings.IntervalMs} ms, destinazione {TargetLabel(Settings.Target)}, {EndpointLabel()}");
     }
 
     public void Stop()
@@ -101,11 +141,7 @@ public sealed class LoadGenerator : BackgroundService
 
     public void ResetStats()
     {
-        lock (_l)
-        {
-            _recent.Clear(); _buckets.Clear(); _latencies.Clear(); _faultResults.Clear();
-            _cntOk = _cntOkRetry = _cntRejected = _cntGaveUp = _cntRetries = _cntReplay = _skipped = 0;
-        }
+        lock (_l) { _recent.Clear(); _total = new OpStats(); _byEndpoint.Clear(); _faultResults.Clear(); _skipped = 0; }
         _events.Info("Statistiche azzerate (numerazione e storico per la verifica invariati)");
     }
 
@@ -152,8 +188,8 @@ public sealed class LoadGenerator : BackgroundService
         var op = new OpRecord { Seq = seq, RequestId = Guid.NewGuid().ToString("D"), StartedAt = DateTimeOffset.Now };
         _ops[seq] = op;
         if (_ops.Count > 1_000_000 && _ops.TryRemove(_ops.Keys.Min(), out _)) { }
-        byte[] body = BuildPayload(op);                          // serializzato una sola volta: retry con gli stessi byte
         var settings = Settings;
+        byte[]? body = null;                                     // costruito una sola volta, appena l'endpoint è noto
         Interlocked.Increment(ref _inFlight);
         var sw = Stopwatch.StartNew();
         try
@@ -161,12 +197,16 @@ public sealed class LoadGenerator : BackgroundService
             int lastNetErrPort = -1;
             for (int attempt = 0; ; attempt++)
             {
-                if (op.EndpointPath.Length == 0 && PickEndpoint(settings.Endpoint, seq) is { } ep) { op.Endpoint = ep.Name; op.EndpointPath = ep.Path; }
+                if (body == null && PickEndpoint(settings, seq) is { } ep)
+                {
+                    op.Endpoint = ep.Name; op.EndpointPath = ep.Path;
+                    body = _payloads.Build(ep.Name, seq, op.StartedAt, RunId, settings.PadBytes);   // retry con gli stessi byte
+                }
                 var node = Pick(settings.Target, seq, attempt, lastNetErrPort);
-                if (node == null || op.EndpointPath.Length == 0)
+                if (node == null || body == null)
                 {
                     string why = node == null ? "nessun nodo raggiungibile"
-                        : settings.Endpoint.Length > 0 ? $"endpoint '{settings.Endpoint}' non esposto dal cluster" : "nessun endpoint noto";
+                        : _monitor.KnownEndpoints().Count == 0 ? "nessun endpoint noto" : "nessun endpoint abilitato (tutti i pesi a 0)";
                     lock (op) op.Attempts.Add(new Attempt(node?.Port ?? 0, 0, 0, why));
                     op.Error = why;
                 }
@@ -187,8 +227,7 @@ public sealed class LoadGenerator : BackgroundService
                 // backoff esponenziale con jitter (REQ-CLI-1), entro il budget complessivo dell'operazione
                 int backoff = (int)Math.Min(2000, 100 * Math.Pow(2, Math.Min(attempt, 5))) + Random.Shared.Next(0, 100);
                 if (sw.ElapsedMilliseconds + backoff > _opt.RetryBudgetMs) { op.Outcome = OpOutcome.Abbandonata; break; }
-                Interlocked.Increment(ref _cntRetries);
-                Count(4);
+                CountRetry(op.Endpoint);
                 await Task.Delay(backoff, ct);
             }
         }
@@ -203,29 +242,21 @@ public sealed class LoadGenerator : BackgroundService
         return op;
     }
 
-    private byte[] BuildPayload(OpRecord op)
-    {
-        using var ms = new MemoryStream();
-        using (var w = new Utf8JsonWriter(ms))
-        {
-            w.WriteStartObject();
-            w.WriteNumber("seq", op.Seq);
-            w.WriteString("timestamp", op.StartedAt);
-            w.WriteString("source", _opt.Source);
-            w.WriteString("runId", RunId);
-            if (Settings.PadBytes > 0) w.WriteString("pad", new string('x', Settings.PadBytes));
-            w.WriteEndObject();
-        }
-        return ms.ToArray();
-    }
+    /// <summary>Peso effettivo di un endpoint: quello configurato (0-100), altrimenti 1.</summary>
+    private static int WeightOf(GeneratorSettings s, string name) => s.EndpointWeights.TryGetValue(name, out var w) ? w : 1;
 
-    /// <summary>Endpoint dell'operazione: quello richiesto, oppure a rotazione su quelli esposti dal cluster.</summary>
-    private SimEndpoint? PickEndpoint(string name, long seq)
+    /// <summary>
+    /// Endpoint dell'operazione, in proporzione ai pesi. La scelta dipende solo da seq: con pesi 3 e 1 su 4 operazioni
+    /// consecutive tre vanno al primo endpoint e una al secondo.
+    /// </summary>
+    private SimEndpoint? PickEndpoint(GeneratorSettings s, long seq)
     {
-        var eps = _monitor.KnownEndpoints();
-        if (eps.Count == 0) return null;
-        if (name.Length > 0) return eps.FirstOrDefault(e => e.Name.Equals(name, StringComparison.Ordinal));
-        return eps[(int)(seq % eps.Count)];
+        var eps = _monitor.KnownEndpoints().Select(e => (e, w: WeightOf(s, e.Name))).Where(x => x.w > 0).ToList();
+        int total = eps.Sum(x => x.w);
+        if (total == 0) return null;
+        long k = seq % total;
+        foreach (var (e, w) in eps) { if (k < w) return e; k -= w; }
+        return eps[^1].e;
     }
 
     private NodeView? Pick(string target, long seq, int attempt, int avoidPort)
@@ -247,81 +278,93 @@ public sealed class LoadGenerator : BackgroundService
         }
     }
 
-    private void Count(int index)
+    // ------------------------------------------------------------------ statistiche
+    private IEnumerable<OpStats> StatsFor(string endpoint)
     {
-        long sec = DateTimeOffset.Now.ToUnixTimeSeconds() / Bucket;
-        lock (_l)
-        {
-            if (!_buckets.TryGetValue(sec, out var b)) _buckets[sec] = b = new int[5];
-            b[index]++;
-            while (_buckets.Count > BucketsKept) _buckets.Remove(_buckets.Keys.First());
-        }
+        yield return _total;
+        if (endpoint.Length == 0) yield break;
+        if (!_byEndpoint.TryGetValue(endpoint, out var s)) _byEndpoint[endpoint] = s = new OpStats();
+        yield return s;
+    }
+
+    private void CountRetry(string endpoint)
+    {
+        long sec = DateTimeOffset.Now.ToUnixTimeSeconds();
+        lock (_l) foreach (var s in StatsFor(endpoint)) { s.Retries++; s.Bucket(sec, 4); }
     }
 
     private void Complete(OpRecord op)
     {
-        switch (op.Outcome)
-        {
-            case OpOutcome.Ok: Interlocked.Increment(ref _cntOk); Count(0); break;
-            case OpOutcome.OkDopoRetry: Interlocked.Increment(ref _cntOkRetry); Count(1); break;
-            case OpOutcome.Rifiutata: Interlocked.Increment(ref _cntRejected); Count(2); break;
-            default: Interlocked.Increment(ref _cntGaveUp); Count(3); break;
-        }
-        if (op.Replay) Interlocked.Increment(ref _cntReplay);
+        int index = op.Outcome switch { OpOutcome.Ok => 0, OpOutcome.OkDopoRetry => 1, OpOutcome.Rifiutata => 2, _ => 3 };
+        long sec = DateTimeOffset.Now.ToUnixTimeSeconds();
         if (op.Outcome == OpOutcome.Abbandonata)
-            _events.Error($"Operazione #{op.Seq} abbandonata dopo {op.Attempts.Count} tentativi ({op.Error}). Può essere stata scritta comunque: vedi Verifica");
+            _events.Error($"Operazione #{op.Seq}{EndpointSuffix(op)} abbandonata dopo {op.Attempts.Count} tentativi ({op.Error}). Può essere stata scritta comunque: vedi Verifica");
         else if (op.Outcome == OpOutcome.Rifiutata)
-            _events.Warn($"Operazione #{op.Seq} rifiutata: {op.FinalStatus} {op.Error}");
+            _events.Warn($"Operazione #{op.Seq}{EndpointSuffix(op)} rifiutata: {op.FinalStatus} {op.Error}");
         lock (_l)
         {
+            foreach (var s in StatsFor(op.Endpoint))
+            {
+                switch (index) { case 0: s.Ok++; break; case 1: s.OkRetry++; break; case 2: s.Rejected++; break; default: s.GaveUp++; break; }
+                if (op.Replay) s.Replays++;
+                s.Bucket(sec, index);
+                if (index <= 1) s.Latency(op.LatencyMs);
+            }
             _recent.AddFirst(op);
             while (_recent.Count > 200) _recent.RemoveLast();
-            if (op.Outcome is OpOutcome.Ok or OpOutcome.OkDopoRetry)
+            if (index <= 1 && _fault != null && op.StartedAt >= _fault.At)
             {
-                _latencies.Enqueue(op.LatencyMs);
-                while (_latencies.Count > 2000) _latencies.Dequeue();
-                if (_fault != null && op.StartedAt >= _fault.At)
-                {
-                    var ms = (long)((op.CompletedAt ?? DateTimeOffset.Now) - _fault.At).TotalMilliseconds;
-                    _faultResults.Insert(0, new { fault = _fault.Description, at = _fault.At, firstOkAfterMs = ms, seq = op.Seq });
-                    if (_faultResults.Count > 20) _faultResults.RemoveAt(_faultResults.Count - 1);
-                    _events.Ok($"Failover: primo 200 dopo {ms} ms da «{_fault.Description}» (operazione #{op.Seq})");
-                    _fault = null;
-                }
+                var ms = (long)((op.CompletedAt ?? DateTimeOffset.Now) - _fault.At).TotalMilliseconds;
+                _faultResults.Insert(0, new { fault = _fault.Description, at = _fault.At, firstOkAfterMs = ms, seq = op.Seq });
+                if (_faultResults.Count > 20) _faultResults.RemoveAt(_faultResults.Count - 1);
+                _events.Ok($"Failover: primo 200 dopo {ms} ms da «{_fault.Description}» (operazione #{op.Seq})");
+                _fault = null;
             }
         }
     }
 
+    private static string EndpointSuffix(OpRecord op) => op.Endpoint.Length > 0 ? $" ({op.Endpoint})" : "";
+
     // ------------------------------------------------------------------ stato per l'interfaccia
     public object State()
     {
+        var endpoints = _monitor.KnownEndpoints();
+        var settings = Settings;
         lock (_l)
         {
-            var lat = _latencies.OrderBy(x => x).ToArray();
-            long P(double q) => lat.Length == 0 ? 0 : lat[Math.Min(lat.Length - 1, (int)Math.Ceiling(q * lat.Length) - 1)];
             long nowSec = DateTimeOffset.Now.ToUnixTimeSeconds();
-            var series = Enumerable.Range(0, 120).Select(i =>
-            {
-                long s = nowSec - 119 + i;
-                var b = _buckets.TryGetValue(s, out var v) ? v : new int[5];
-                return new[] { b[0], b[1], b[2], b[3], b[4] };
-            }).ToList();
+            int totalWeight = endpoints.Sum(e => WeightOf(settings, e.Name));
+            // endpoint esposti dal cluster, più quelli che hanno già statistiche (es. un endpoint rimosso nel frattempo)
+            var names = endpoints.Select(e => e.Name).Concat(_byEndpoint.Keys).Distinct().ToList();
             return new
             {
                 running = _running,
                 runId = RunId,
-                settings = Settings,
-                targetLabel = TargetLabel(Settings.Target),
-                endpointLabel = EndpointLabel(Settings.Endpoint),
+                settings,
+                targetLabel = TargetLabel(settings.Target),
+                endpointLabel = EndpointLabel(),
                 counters = new
                 {
                     sent = Interlocked.Read(ref _seq),
                     inFlight = Interlocked.Read(ref _inFlight),
-                    ok = _cntOk, okAfterRetry = _cntOkRetry, rejected = _cntRejected, gaveUp = _cntGaveUp,
-                    retries = _cntRetries, replays = _cntReplay, skipped = _skipped
+                    ok = _total.Ok, okAfterRetry = _total.OkRetry, rejected = _total.Rejected, gaveUp = _total.GaveUp,
+                    retries = _total.Retries, replays = _total.Replays, skipped = _skipped
                 },
-                latency = new { p50 = P(0.5), p95 = P(0.95), p99 = P(0.99), max = lat.Length == 0 ? 0 : lat[^1], samples = lat.Length },
-                series,
+                latency = _total.LatencySummary(),
+                series = _total.Series(nowSec),
+                byEndpoint = names.Select(name =>
+                {
+                    var ep = endpoints.FirstOrDefault(e => e.Name == name);
+                    var s = _byEndpoint.TryGetValue(name, out var v) ? v : new OpStats();
+                    int w = ep == null ? 0 : WeightOf(settings, name);
+                    return new
+                    {
+                        name, path = ep?.Path, exposed = ep != null, weight = w,
+                        share = totalWeight == 0 || ep == null ? 0 : Math.Round(100.0 * w / totalWeight, 1),
+                        counters = s.Counters(), latency = s.LatencySummary(), series = s.Series(nowSec)
+                    };
+                }).ToList(),
+                payloadTemplates = _payloads.Templates(endpoints.Select(e => e.Name)),
                 pendingFault = _fault == null ? null : new { _fault.Description, _fault.At },
                 failovers = _faultResults.ToList(),
                 recent = _recent.Take(60).Select(o => new
@@ -334,7 +377,15 @@ public sealed class LoadGenerator : BackgroundService
         }
     }
 
-    private static string EndpointLabel(string endpoint) => endpoint.Length == 0 ? "tutti gli endpoint a rotazione" : "endpoint " + endpoint;
+    private string EndpointLabel()
+    {
+        var eps = _monitor.KnownEndpoints();
+        var active = eps.Select(e => (e.Name, w: WeightOf(Settings, e.Name))).Where(x => x.w > 0).ToList();
+        if (eps.Count == 0) return "endpoint non ancora noti";
+        if (active.Count == 0) return "nessun endpoint abilitato";
+        if (active.Count == eps.Count && active.All(x => x.w == active[0].w)) return "tutti gli endpoint a rotazione";
+        return "endpoint " + string.Join(", ", active.Select(x => x.w == 1 ? x.Name : $"{x.Name}×{x.w}"));
+    }
 
     private string TargetLabel(string target) => target switch
     {

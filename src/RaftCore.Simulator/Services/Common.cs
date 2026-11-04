@@ -13,8 +13,10 @@ public sealed class SimulatorOptions
     public int StatusTimeoutMs { get; set; } = 500;
     public int DefaultIntervalMs { get; set; } = 200;
     public string DefaultTarget { get; set; } = "RoundRobin";
-    /// <summary>Nome dell'endpoint iniziale dell'invio ciclico; vuoto = tutti gli endpoint a rotazione.</summary>
-    public string DefaultEndpoint { get; set; } = "";
+    /// <summary>Pesi iniziali dell'invio ciclico per nome di endpoint (0 = escluso); un endpoint non elencato ha peso 1.</summary>
+    public Dictionary<string, int> DefaultEndpointWeights { get; set; } = new();
+    /// <summary>Modello del payload per nome di endpoint: campo -> valore, con segnaposto (vedi PayloadFactory).</summary>
+    public Dictionary<string, Dictionary<string, string>> Payloads { get; set; } = new();
     public int MaxInFlight { get; set; } = 64;
     public int RequestTimeoutMs { get; set; } = 15000;
     public int RetryBudgetMs { get; set; } = 60000;

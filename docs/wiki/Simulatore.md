@@ -46,20 +46,46 @@ cd src/RaftCore.Simulator && dotnet run --launch-profile Simulatore
 
 Il nodo 1 ha il badge **debug**.
 
-**Invio ciclico.** Ogni operazione invia un JSON del tipo:
+**Invio ciclico.** Gli endpoint sono letti da `GET /api/v1/cluster/status` dei nodi (campo `endpoints`), quindi il simulatore ne gestisce quanti ne espone il cluster, senza configurarli. Ogni operazione:
+
+- sceglie un endpoint in proporzione ai **pesi**;
+- invia il JSON del **modello** di quell'endpoint;
+- resta sullo stesso endpoint in tutti i ritenti.
+
+Il body contiene sempre i campi usati dalla verifica, più quelli del modello. Con i modelli d'esempio, un'operazione verso `misure` invia:
 
 ```json
-{"seq": 42, "timestamp": "2026-10-19T16:28:14.2157204+02:00", "source": "simulatore", "runId": "6f2bf38c-…"}
+{"seq": 42, "timestamp": "2026-11-04T14:32:25.1188645+01:00", "source": "simulatore", "runId": "6f2bf38c-…",
+ "sensore": "S-02", "unita": "°C", "valore": 91.28}
 ```
 
-`seq` è progressivo, `runId` identifica la sessione del simulatore. Gli endpoint sono letti da `GET /api/v1/cluster/status` dei nodi (campo `endpoints`), quindi non vanno configurati nel simulatore. Si possono impostare:
+`seq` è progressivo, `runId` identifica la sessione del simulatore. Si possono impostare:
 
 - **intervallo** in ms;
-- **endpoint**: tutti a rotazione oppure uno preciso;
 - **destinazione**: tutti a rotazione, solo il Leader, solo i Follower per provare l'inoltro, oppure un nodo preciso;
 - **riempimento**: un campo `pad` per simulare payload più grandi.
 
 Ci sono anche *Invia una* e *Raffica* (N operazioni contemporanee).
+
+**Endpoint.** La tabella *Endpoint* ha una riga per endpoint con:
+
+- il **peso**, da 0 a 100: 0 esclude l'endpoint, e un endpoint nuovo parte con peso 1. Con pesi 3 e 1, su quattro operazioni tre vanno al primo endpoint e una al secondo;
+- la **quota** di traffico che ne risulta;
+- contatori e latenze (p50/p95) dell'endpoint;
+- il pulsante **Modello**, che apre l'editor del JSON dell'endpoint.
+
+Il modello è un oggetto JSON, anche annidato, i cui valori stringa possono contenere segnaposto:
+
+| Segnaposto | Valore |
+| --- | --- |
+| `{seq}` | numero progressivo dell'operazione |
+| `{now}` | istante di invio (ISO 8601) |
+| `{uuid}` | GUID nuovo |
+| `{random}` | decimale da 0 a 100, con 2 cifre |
+| `{randomInt}` | intero da 0 a 1000 |
+| `{choice:a\|b\|c}` | uno dei valori elencati |
+
+Una stringa composta solo da `{seq}`, `{random}` o `{randomInt}` diventa un numero JSON. I valori casuali dipendono da `seq`: la stessa operazione produce sempre gli stessi byte. I campi `seq`, `timestamp`, `source`, `runId`, `scenario` e `pad` sono riservati. *Anteprima* mostra un body d'esempio. I modelli modificati dall'interfaccia valgono fino al riavvio del simulatore; quelli iniziali si impostano in `Simulator:Payloads` (vedi Configurazione).
 
 Il simulatore si comporta come un client conforme al [Contratto client](Contratto-client):
 
@@ -69,7 +95,7 @@ Il simulatore si comporta come un client conforme al [Contratto client](Contratt
 - mai retry su 4xx;
 - su errore di rete prova un altro nodo.
 
-Contatori, latenze (p50/p95/max), grafico degli ultimi 120 s e tabella delle ultime operazioni mostrano per ognuna il percorso dei tentativi, ad esempio `5002✕ → 5003:200`. *Esporta CSV* scarica lo storico completo.
+Contatori e latenze (p50/p95/max) sono complessivi; quelli di ogni endpoint stanno nella tabella *Endpoint*. Il grafico degli ultimi 120 s mostra tutti gli endpoint oppure, con il selettore *Grafico*, uno solo. La tabella delle ultime operazioni riporta l'endpoint e il percorso dei tentativi, ad esempio `5002✕ → 5003:200`. *Esporta CSV* scarica lo storico completo, con la colonna `endpoint`.
 
 ## Guasti
 
@@ -88,7 +114,7 @@ Il simulatore agisce solo su processi `RaftCore` individuati dalla porta in asco
 
 ## Scenari
 
-Ogni scenario si esegue con un clic (o *Esegui tutti*) e riporta l'esito atteso, i passi e il verdetto:
+Ogni scenario si esegue con un clic (o *Esegui tutti*) e riporta l'esito atteso, i passi e il verdetto. Il selettore *Endpoint* sceglie su quale endpoint eseguirli; con **tutti** ogni scenario gira su ciascun endpoint e mostra un verdetto per endpoint. I body seguono il modello dell'endpoint, così un writer che valida il proprio schema non rifiuta le richieste degli scenari; queste scritture hanno un `runId` proprio e non entrano nella verifica della sessione. Fa eccezione «Path non configurato», che non dipende dall'endpoint e gira una sola volta.
 
 | Scenario | Atteso |
 | --- | --- |
@@ -100,7 +126,7 @@ Ogni scenario si esegue con un clic (o *Esegui tutti*) e riporta l'esito atteso,
 | Body oltre `MaxBodyBytes` | 413, nessuna scrittura (T34) |
 | `X-Forward-Hops` e `X-Forwarded-By` inviati dal client | 200: header non firmati ignorati |
 | Body senza `Content-Type` | 200 |
-| Stesso ID su due endpoint diversi | 200, poi 422; una sola scrittura (T59) |
+| Stesso ID su un altro endpoint | 200, poi 422 sull'endpoint successivo; una sola scrittura (T59) |
 | Path non configurato | 404 (T60) |
 
 ## Verifica delle scritture
@@ -131,7 +157,8 @@ SELECT RequestId FROM dbo.Misure INTERSECT SELECT RequestId FROM dbo.Eventi;   -
 | `Ports` | `5001-5010` | Stesso formato di `RestPorts` |
 | `StatusPollMs` / `StatusTimeoutMs` | 1000 / 500 | Sondaggio di `/api/v1/cluster/status` e `/health/ready` |
 | `DefaultIntervalMs` / `DefaultTarget` | 200 / `RoundRobin` | Valori iniziali dell'invio ciclico |
-| `DefaultEndpoint` | — | Endpoint iniziale (`Name`); vuoto: tutti a rotazione |
+| `DefaultEndpointWeights` | {} | Pesi iniziali per `Name` (0-100, 0 = escluso); un endpoint non elencato ha peso 1 |
+| `Payloads` | modelli di `misure` ed `eventi` | Modello iniziale per `Name`: campo → valore con segnaposto. Numeri e `true`/`false` restano tipizzati; per oggetti annidati usare l'editor |
 | `MaxInFlight` | 64 | Oltre, i tick dell'invio ciclico vengono saltati e contati |
 | `RequestTimeoutMs` | 15000 | Timeout per tentativo (REQ-CLI-2) |
 | `RetryBudgetMs` | 60000 | Tempo massimo dei ritenti di un'operazione |
@@ -140,4 +167,4 @@ SELECT RequestId FROM dbo.Misure INTERSECT SELECT RequestId FROM dbo.Eventi;   -
 | `NodeWorkingDirectory` | `../RaftCore` | Directory di lavoro dei nodi riavviati (Windows) |
 | `NodeEnvironment` | — | Variabili ereditate dai nodi riavviati. In Development contiene `ASPNETCORE_ENVIRONMENT` e il segreto di sviluppo |
 
-API del simulatore, utili anche per script: `GET /sim/state`, `POST /sim/generator/start|stop|one|burst|reset`, `POST /sim/scenarios/{id}`, `POST /sim/nodes/{nodeId}/kill|pause|resume|restart`, `POST /sim/leader/kill|pause`, `POST /sim/verify`, `GET /sim/ops.csv`.
+API del simulatore, utili anche per script: `GET /sim/state`, `POST /sim/generator/start|stop|one|burst|reset`, `POST /sim/scenarios/{id}?endpoint=<nome>|*` (un esito per endpoint), `PUT /sim/payloads/{endpoint}` (body: il modello JSON), `POST /sim/payloads/{endpoint}/preview`, `POST /sim/nodes/{nodeId}/kill|pause|resume|restart`, `POST /sim/leader/kill|pause`, `POST /sim/verify`, `GET /sim/ops.csv`.
