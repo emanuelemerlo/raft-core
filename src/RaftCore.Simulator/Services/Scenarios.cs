@@ -8,7 +8,7 @@ public sealed record ScenarioStep(string Label, int Port, int Status, bool Repla
 
 public sealed record ScenarioResult(string Id, string Title, string Expected, bool Passed, string Summary, IReadOnlyList<ScenarioStep> Steps, DateTimeOffset At);
 
-/// <summary>Casi del contratto client e dell'idempotenza (§12, §14, §15 della specifica), eseguiti su richiesta.</summary>
+/// <summary>Casi del contratto client e dell'idempotenza (§12, §14, §15 della specifica, docs/specifica.md), eseguiti su richiesta.</summary>
 public sealed class ScenarioRunner
 {
     private readonly SimulatorOptions _opt;

@@ -18,3 +18,4 @@ RaftCore riceve dati JSON su uno o più endpoint REST e li scrive una sola volta
 
 **Capire**
 - [Architettura](Architettura)
+- [Specifica](Specifica) — requisiti normativi, garanzie e matrice dei test (rev. 6)

@@ -73,7 +73,7 @@ docker compose -f deploy/docker/docker-compose.yml up --build
 | Monitoraggio, aggiornamenti, aggiunta di endpoint, sostituzione di un nodo | [Operazioni](docs/wiki/Operazioni.md) |
 | Problemi comuni | [Risoluzione dei problemi](docs/wiki/Risoluzione-problemi.md) |
 | Rilasci | [Creare una release](docs/wiki/Rilasci.md) · [CHANGELOG](CHANGELOG.md) |
-| Specifica | [Modifiche proposte per la rev. 6](docs/specifica-rev6-delta.md), endpoint multipli inclusi |
+| Requisiti, garanzie e matrice dei test | [Specifica (rev. 6)](docs/specifica.md) |
 
 ## Struttura del repository
 

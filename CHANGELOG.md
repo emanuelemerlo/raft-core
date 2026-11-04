@@ -57,6 +57,7 @@ Il workflow di release usa la sezione della versione come note di rilascio.
 - Firma HMAC delle RPC e delle risposte estesa alla versione di protocollo (header `X-Cluster-Protocol`) e, nelle risposte, all'impronta degli endpoint (`X-Cluster-Endpoints`).
 
 ### Rimosso
+- `docs/specifica-rev6-delta.md`: sostituito dalla specifica completa rev. 6 (`docs/specifica.md`), pubblicata anche nella wiki come pagina «Specifica».
 - `StateMachine:SqlServer:DataTable` e la tabella `raft.IngestedData`: sostituite da `Endpoints[].Table`.
 - Un segreto `dev-only-…` viene rifiutato fuori dall'ambiente Development.
 - Log della console senza gli scope di tracing (`SpanId`/`TraceId`).

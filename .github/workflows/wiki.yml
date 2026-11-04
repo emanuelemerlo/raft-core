@@ -1,12 +1,12 @@
 name: Wiki
 
-# Pubblica docs/wiki nella Wiki del repository a ogni modifica su main.
+# Pubblica docs/wiki (e docs/specifica.md come pagina Specifica) nella Wiki del repository a ogni modifica su main.
 # Prerequisito una tantum: abilitare la Wiki e creare la prima pagina dall'interfaccia di GitHub
 # (il repository <repo>.wiki.git esiste solo dopo la prima pagina).
 on:
   push:
     branches: [ main ]
-    paths: [ 'docs/wiki/**' ]
+    paths: [ 'docs/wiki/**', 'docs/specifica.md' ]
   workflow_dispatch:
 
 permissions:
@@ -30,6 +30,8 @@ jobs:
           fi
           git clone "$url" wiki
           rsync -a --delete --exclude .git docs/wiki/ wiki/
+          # la specifica vive in docs/specifica.md (unica copia) e viene pubblicata come pagina Specifica
+          cp docs/specifica.md wiki/Specifica.md
           cd wiki
           git add -A
           git diff --cached --quiet && { echo "Wiki già aggiornata"; exit 0; }
