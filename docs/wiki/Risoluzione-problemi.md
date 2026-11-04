@@ -21,7 +21,7 @@ Tutte le porte di `RestPorts` sono occupate: aggiungere porte all'elenco (es. `5
 La `DataDir` contiene un WAL scritto dalla versione 0.2, che non viene migrato. Vedere [Operazioni](Operazioni) → aggiornamento dalla 0.2 alla 0.3.
 
 ### Il nodo non parte: errori su `Endpoints` (codice 1)
-Il messaggio elenca le violazioni: nessun endpoint, `Name` o `Path` duplicati, path riservato (`/internal`, `/health`, `/api/v1/cluster`, `/api/v1/metrics`), `Table` mancante per un endpoint senza writer personalizzato. Vedere [Configurazione](Configurazione) → endpoint.
+Il messaggio elenca le violazioni: nessun endpoint, `Name`, `Path` o `Table` duplicati, path riservato (`/internal`, `/health`, `/api/v1/cluster`, `/api/v1/metrics`), `Table` mancante per un endpoint senza writer personalizzato, writer registrato senza nome (`AddSingleton<ISqlPayloadWriter, …>` della 0.2: usare `AddPayloadWriter<T>("nome")`) o per un nome che non è in `Endpoints`. Vedere [Configurazione](Configurazione) → endpoint.
 
 ### Un nodo aggiornato non entra nel cluster
 I nodi con versioni di protocollo diverse si rifiutano a vicenda: nei log compare `versione di protocollo` e cresce `rpcProtocolMismatch`. Aggiornare tutti i nodi alla stessa versione.

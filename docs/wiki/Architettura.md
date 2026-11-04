@@ -41,7 +41,7 @@ Quando un gruppo di endpoint deve essere isolato dagli altri (tabelle lente, car
 ## Versioni e compatibilità
 
 - Ogni RPC e ogni annuncio UDP contengono la **versione di protocollo**. Un nodo di un'altra versione viene rifiutato: non vota, non riceve voci e non conta nel quorum. Un aggiornamento che cambia la versione di protocollo richiede quindi il riavvio di tutti i nodi (vedi [Operazioni](Operazioni)).
-- Ogni RPC contiene anche l'**impronta della configurazione degli endpoint**. Una differenza non blocca il cluster, per permettere di aggiornare la configurazione un nodo alla volta, ma viene segnalata.
+- Ogni RPC e ogni risposta firmata contengono anche l'**impronta della configurazione degli endpoint**. Una differenza non blocca il cluster, per permettere di aggiornare la configurazione un nodo alla volta, ma viene segnalata.
 - Il WAL ha un formato versionato (attuale: 2) e lo schema del database una versione (attuale: 2). Non è prevista migrazione da formati precedenti: un WAL di formato diverso blocca l'avvio del nodo, uno schema di versione diversa blocca l'apply.
 
 ## Elezione
