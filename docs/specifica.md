@@ -465,7 +465,7 @@ rpcProtocolMismatch, endpointsHashMismatch, forwardUntrustedHeaders, peerUrlUnkn
 
 **REQ-VER-1 (versione di protocollo).** Ogni RPC tra nodi e ogni annuncio UDP DEVONO contenere `ProtocolVersion` (header `X-Cluster-Protocol` per le RPC), incluso nella firma HMAC di richieste, risposte e annunci. Un nodo DEVE rifiutare le RPC (409) e ignorare gli annunci con una versione diversa dalla propria (metrica `rpcProtocolMismatch`): un nodo di versione incompatibile non vota, non riceve voci e non conta nel quorum. La versione DEVE essere incrementata a ogni modifica incompatibile di RPC, voci o WAL; un aggiornamento che la cambia richiede il riavvio di tutti i nodi.
 
-Ogni RPC e ogni risposta firmata contengono anche `EndpointsHash`, l'impronta della configurazione degli endpoint (nome, path e tabella). Un valore diverso NON blocca le RPC, così da permettere un aggiornamento della configurazione un nodo alla volta, ma DEVE essere segnalato (log, metrica `endpointsHashMismatch` con il numero di membri discordanti, campo `endpointsMismatch` dello stato).
+Ogni RPC e ogni risposta firmata contengono anche `EndpointsHash`, l'impronta della configurazione degli endpoint (nome, path e tabella). Un valore diverso NON blocca le RPC, così da permettere un aggiornamento della configurazione un nodo alla volta, ma DEVE essere segnalato (log, metrica `endpointsHashMismatch` con il numero di membri discordanti, campo `endpointsMismatch` dello stato). Ogni nodo confronta solo le impronte dei membri con cui scambia RPC: il **Leader** le vede tutte, un Follower vede quella del Leader. Lo stato di riferimento è quindi quello del Leader.
 
 **REQ-VER-2 (dati di formato precedente).** Non è prevista migrazione dalla v0.2.
 - Un WAL in un altro formato DEVE bloccare l'avvio (codice 2) con un messaggio che indica di svuotare la `DataDir`, senza troncarlo.
@@ -643,7 +643,7 @@ I test di cluster DEVONO usare l'astrazione di tempo, rete e repository (`IClock
 | T60 | Path non configurato | POST a un path sconosciuto (anche `/api/v1/data`) | 404, nessuna voce nel log | EPT-1 |
 | T61 | Endpoint sconosciuto all'applicatore | Voce di un tipo senza writer | `Rejected` (422) registrato; le voci successive vengono applicate | EPT-4 |
 | T62 | Versione di protocollo diversa | RPC senza versione o con un'altra versione | RPC rifiutate (409): il nodo non vota e non conta nel quorum | VER-1 |
-| T63 | `Endpoints` diversi tra i nodi | Un nodo con un endpoint in più | Cluster operativo; `endpointsHashMismatch` > 0 e `endpointsMismatch` nello stato | VER-1 |
+| T63 | `Endpoints` diversi tra i nodi | Un nodo con un endpoint in più | Cluster operativo; la discrepanza è segnalata dal Leader e dal nodo discordante (`endpointsHashMismatch`, `endpointsMismatch`) | VER-1 |
 | T64 | WAL di un altro formato | Avvio su un WAL in formato 1 | Avvio bloccato (codice 2), WAL non troncato | VER-2, WAL-3 |
 | T65 | `Endpoints` non validi | Vuoti, nome o path duplicato, path riservato, tabella mancante, writer senza nome | Avvio bloccato (codice 1) con l'elenco delle violazioni | EPT-1, CFG-1 |
 | T66 | Schema di un'altra versione | Database con `SchemaVersion` diversa o assente | Nessun apply; `stateMachineError` valorizzato, Leader Not Ready | VER-2 |

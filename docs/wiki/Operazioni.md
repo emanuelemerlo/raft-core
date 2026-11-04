@@ -23,7 +23,7 @@
 | `membersHashMismatch`, `nonMemberRejected` | > 0 | Configurazione dei membri diversa tra i nodi |
 | `rpcClockSkewRejected` | > 0 | Orologio fuori tolleranza: verificare NTP |
 | `rpcProtocolMismatch` | > 0 | Un nodo di un'altra versione di protocollo tenta di comunicare: completare l'aggiornamento |
-| `endpointsHashMismatch` | > 0 a fine aggiornamento | Numero di membri con una configurazione `Endpoints` diversa da quella del nodo (elenco in `endpointsMismatch` dello stato) |
+| `endpointsHashMismatch` | > 0 a fine aggiornamento | Numero di membri con una configurazione `Endpoints` diversa da quella del nodo (elenco in `endpointsMismatch` dello stato). Fa fede il **Leader**, l'unico che scambia RPC con tutti; un Follower confronta solo il Leader |
 | `applyUnknownType` | > 0 | Voci di un endpoint che il Leader non conosce, registrate come rifiutate |
 | `storageAvailableBytes` | sotto il 30% | Spazio disco (allarmi nei log al 70% e all'85% di occupazione) |
 

@@ -38,7 +38,7 @@ Il servizio espone uno o più endpoint `POST`, ciascuno per un tipo di dato con 
 | `Path` | Path del `POST`, ad esempio `/api/v1/misure`. Unico (senza distinzione tra maiuscole e minuscole), senza parametri né `/` finale. Non può iniziare con `/internal`, `/health`, `/api/v1/cluster` o `/api/v1/metrics` |
 | `Table` | Tabella `schema.tabella` del writer JSON di default (solo `Provider=SqlServer`). Unica per endpoint e diversa dalle tabelle di servizio. Facoltativa se per quel `Name` è registrato un writer personalizzato (vedi [SQL Server](SQL-Server)) |
 
-Vincoli: almeno un endpoint, al massimo 64. La configurazione deve essere **identica su tutti i nodi**: se differisce, il cluster continua a funzionare ma lo segnala (metrica `endpointsHashMismatch` e campo `endpointsMismatch` di `GET /api/v1/cluster/status`). Per aggiungere o rimuovere un endpoint vedere [Operazioni](Operazioni).
+Vincoli: almeno un endpoint, al massimo 64. La configurazione deve essere **identica su tutti i nodi**: se differisce, il cluster continua a funzionare ma lo segnala (metrica `endpointsHashMismatch` e campo `endpointsMismatch` di `GET /api/v1/cluster/status` sul Leader). Per aggiungere o rimuovere un endpoint vedere [Operazioni](Operazioni).
 
 Da variabili d'ambiente gli elementi si indicano con l'indice: `RaftCluster__Endpoints__0__Name=misure`, `RaftCluster__Endpoints__0__Path=/api/v1/misure`, e così via.
 

@@ -81,12 +81,24 @@ public class EndpointTests
         await c.StartAllAsync();
         int l = await c.WaitForLeaderAsync();
         Assert.Equal(200, (await c.PostAsync(c.Running.First(i => i != l), Id(), "{\"a\":1}")).Status);
-        var odd = ClusterConfig.Norm(c.Nodes[2].Id);
-        await c.WaitUntilAsync(() => c.Running.Where(i => i != 2).All(i => Mismatch(c, i).Contains(odd)), TimeSpan.FromSeconds(10),
-            "il nodo 2 risulta discordante sugli altri nodi");
-        await c.WaitUntilAsync(() => Mismatch(c, 2).Count == 2, TimeSpan.FromSeconds(10), "il nodo 2 vede gli altri due discordanti");
-        Assert.Equal(1, c.Raft(0).GetMetrics()["endpointsHashMismatch"]);
-        Assert.Equal(2, c.Raft(2).GetMetrics()["endpointsHashMismatch"]);
+        // Le impronte si osservano solo tra nodi che si scambiano RPC: il Leader le vede tutte, un Follower vede il Leader.
+        // Quindi la discrepanza è sempre visibile almeno sul Leader e sul nodo discordante.
+        string NodeOf(int i) => ClusterConfig.Norm(c.Nodes[i].Id);
+        if (l != 2)
+        {
+            await c.WaitUntilAsync(() => Mismatch(c, l).SequenceEqual(new[] { NodeOf(2) }), TimeSpan.FromSeconds(10), "il Leader segnala il nodo 2");
+            await c.WaitUntilAsync(() => Mismatch(c, 2).Contains(NodeOf(l)), TimeSpan.FromSeconds(10), "il nodo 2 segnala il Leader");
+            Assert.Equal(1, c.Raft(l).GetMetrics()["endpointsHashMismatch"]);
+            int other = 3 - l - 2;                                                     // l'altro Follower, allineato al Leader
+            Assert.DoesNotContain(NodeOf(l), Mismatch(c, other));
+        }
+        else
+        {
+            await c.WaitUntilAsync(() => Mismatch(c, 2).Count == 2, TimeSpan.FromSeconds(10), "il Leader (nodo 2) segnala gli altri due");
+            await c.WaitUntilAsync(() => Mismatch(c, 0).Contains(NodeOf(2)) && Mismatch(c, 1).Contains(NodeOf(2)), TimeSpan.FromSeconds(10),
+                "i Follower segnalano il Leader");
+            Assert.Equal(2, c.Raft(2).GetMetrics()["endpointsHashMismatch"]);
+        }
     }
 
     private static List<string> Mismatch(TestCluster c, int i)
