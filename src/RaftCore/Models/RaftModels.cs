@@ -1,7 +1,17 @@
 namespace RaftCore.Models;
 
+/// <summary>
+/// Versione del protocollo tra nodi (REQ-VER-1). Entra nella firma di ogni RPC, di ogni risposta e di ogni annuncio UDP:
+/// nodi di versioni diverse si rifiutano a vicenda. Va incrementata a ogni modifica incompatibile di RPC, voci o WAL.
+/// </summary>
+public static class ProtocolInfo
+{
+    public const int Version = 2;
+}
+
 public class DiscoveryMessage
 {
+    public int ProtocolVersion { get; set; }
     public string ClusterId { get; set; } = string.Empty;
     public int ClusterSize { get; set; }
     public string MembersHash { get; set; } = string.Empty;
@@ -24,6 +34,8 @@ public class BaseRpcRequest
     public string DestNodeId { get; set; } = string.Empty;
     /// <summary>URL REST del mittente (preferito all'annuncio UDP, REQ-DIS-5).</summary>
     public string SenderUrl { get; set; } = string.Empty;
+    /// <summary>Impronta della configurazione degli endpoint del mittente: se diversa viene segnalata, senza rifiutare la RPC (REQ-VER-1).</summary>
+    public string EndpointsHash { get; set; } = string.Empty;
 }
 
 public class PreVoteRequest : BaseRpcRequest

@@ -89,12 +89,16 @@ public sealed class NodeSpec
 public sealed class TestCluster : IAsyncDisposable
 {
     public const string Secret = "test-secret-0123456789abcdef";
+    /// <summary>Endpoint configurati su ogni nodo del cluster di test (sovrascrivibili con Extra).</summary>
+    public const string MisurePath = "/api/v1/misure", EventiPath = "/api/v1/eventi";
     public TempDir Dir { get; } = new();
     public List<NodeSpec> Nodes { get; } = new();
     public NetworkFaults Faults { get; } = new();
     public string SharedDir => Path.Combine(Dir.Path, "shared");
     public string ClusterId { get; } = "test-" + Guid.NewGuid().ToString("N")[..8];
     public Dictionary<string, string?> Extra { get; } = new();
+    /// <summary>Impostazioni aggiuntive per un solo nodo (applicate dopo Extra), es. una configurazione Endpoints diversa.</summary>
+    public Func<int, IReadOnlyDictionary<string, string?>>? NodeExtra { get; set; }
     /// <summary>Hook per sostituire il repository (es. fault injection); riceve l'indice del nodo.</summary>
     public Func<int, ClusterConfig, IDataRepository>? RepositoryFactory { get; set; }
     /// <summary>Per nodo: NodeId dei peer da NON configurare come Peers statici (simula discovery incompleta).</summary>
@@ -158,6 +162,12 @@ public sealed class TestCluster : IAsyncDisposable
             ["RaftCluster:StateMachine:SharedFile:Directory"] = SharedDir,
             ["RaftCluster:StateMachine:MaxApplyAttempts"] = "3",
             ["RaftCluster:StateMachine:ApplyRetryMaxDelayMs"] = "200",
+            ["RaftCluster:Endpoints:0:Name"] = "misure",
+            ["RaftCluster:Endpoints:0:Path"] = MisurePath,
+            ["RaftCluster:Endpoints:0:Table"] = "dbo.Misure",
+            ["RaftCluster:Endpoints:1:Name"] = "eventi",
+            ["RaftCluster:Endpoints:1:Path"] = EventiPath,
+            ["RaftCluster:Endpoints:1:Table"] = "dbo.Eventi",
         };
         for (int k = 0; k < Nodes.Count; k++)
         {
@@ -166,6 +176,7 @@ public sealed class TestCluster : IAsyncDisposable
             s[$"RaftCluster:Peers:{Nodes[k].Id}"] = PeerUrlOverride?.Invoke(i, Nodes[k].Id) ?? Nodes[k].Url;
         }
         foreach (var kv in Extra) s[kv.Key] = kv.Value;
+        if (NodeExtra != null) foreach (var kv in NodeExtra(i)) s[kv.Key] = kv.Value;
         return s;
     }
 
@@ -223,24 +234,25 @@ public sealed class TestCluster : IAsyncDisposable
         throw new TimeoutException("Condizione non raggiunta: " + what);
     }
 
-    public async Task<(int Status, string Body, HttpResponseMessage Resp)> PostAsync(int node, string requestId, string json, Dictionary<string, string>? headers = null)
+    public async Task<(int Status, string Body, HttpResponseMessage Resp)> PostAsync(int node, string requestId, string json, Dictionary<string, string>? headers = null,
+        string path = MisurePath)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Post, Nodes[node].Url + "/api/v1/data") { Content = new StringContent(json, Encoding.UTF8, "application/json") };
+        using var req = new HttpRequestMessage(HttpMethod.Post, Nodes[node].Url + path) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
         if (requestId.Length > 0) req.Headers.Add("X-Request-ID", requestId);
         if (headers != null) foreach (var (k, v) in headers) req.Headers.TryAddWithoutValidation(k, v);
         var resp = await Http.SendAsync(req);
         return ((int)resp.StatusCode, await resp.Content.ReadAsStringAsync(), resp);
     }
 
-    /// <summary>Righe del database condiviso su file: (indice, stato, requestId, payload base64).</summary>
-    public List<(long Index, ApplyStatus Status, string RequestId, string Payload)> AppliedRows()
+    /// <summary>Righe del database condiviso su file: (indice, stato, requestId, endpoint, payload base64).</summary>
+    public List<(long Index, ApplyStatus Status, string RequestId, string PayloadType, string Payload)> AppliedRows()
     {
         var f = Path.Combine(SharedDir, "applied.log");
         if (!File.Exists(f)) return new();
         using var fs = new FileStream(f, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         using var r = new StreamReader(fs);
         return r.ReadToEnd().Split('\n', StringSplitOptions.RemoveEmptyEntries)
-            .Select(l => l.Split('\t')).Select(x => (long.Parse(x[0]), (ApplyStatus)int.Parse(x[1]), x[2], x[6])).ToList();
+            .Select(l => l.Split('\t')).Select(x => (long.Parse(x[0]), (ApplyStatus)int.Parse(x[1]), x[2], x[3], x[7])).ToList();
     }
 
     /// <summary>Invarianti (§21): indici applicati contigui, nessun RequestId applicato due volte, log coerenti tra i nodi.</summary>

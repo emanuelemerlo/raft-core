@@ -11,7 +11,8 @@ namespace RaftCore.Services.Storage;
 
 /// <summary>
 /// Scrittura applicativa di una voce dentro la transazione dell'apply. Implementare questa interfaccia per scrivere
-/// nelle proprie tabelle. Per un errore di business permanente lanciare <see cref="PayloadRejectedException"/>
+/// nelle proprie tabelle e registrarla con il nome dell'endpoint (<see cref="PayloadWriterRegistration.AddPayloadWriter{T}"/>):
+/// riceve solo le voci di quell'endpoint. Per un errore di business permanente lanciare <see cref="PayloadRejectedException"/>
 /// (oppure lasciare propagare un errore SQL di vincolo/conversione): la voce viene registrata come Rejected.
 /// </summary>
 public interface ISqlPayloadWriter
@@ -19,12 +20,40 @@ public interface ISqlPayloadWriter
     Task WriteAsync(SqlConnection connection, SqlTransaction transaction, LogEntry entry, string clusterId, CancellationToken ct);
 }
 
-/// <summary>Writer di default: salva il JSON grezzo in StateMachine:SqlServer:DataTable.</summary>
+/// <summary>Registrazione dei writer personalizzati, uno per endpoint (REQ-EPT-4).</summary>
+public static class PayloadWriterRegistration
+{
+    /// <summary>Usa <typeparamref name="T"/> per le voci dell'endpoint <paramref name="endpointName"/> (EndpointConfig.Name).</summary>
+    public static IServiceCollection AddPayloadWriter<T>(this IServiceCollection services, string endpointName) where T : class, ISqlPayloadWriter =>
+        services.AddKeyedSingleton<ISqlPayloadWriter, T>(endpointName);
+
+    public static IServiceCollection AddPayloadWriter(this IServiceCollection services, string endpointName, ISqlPayloadWriter writer) =>
+        services.AddKeyedSingleton(endpointName, writer);
+}
+
+/// <summary>Writer di default: salva il JSON grezzo nella tabella dell'endpoint (EndpointConfig.Table).</summary>
 public sealed class JsonPayloadWriter : ISqlPayloadWriter
 {
     private readonly string _table;
     private readonly int _timeout;
-    public JsonPayloadWriter(SqlServerConfig cfg) { _table = SqlName.Quote(cfg.DataTable); _timeout = cfg.CommandTimeoutSeconds; }
+
+    public JsonPayloadWriter(string table, int commandTimeoutSeconds)
+    {
+        if (!SqlName.IsValidQualified(table)) throw new ArgumentException($"Tabella '{table}' non valida (atteso schema.tabella).", nameof(table));
+        Table = table; _table = SqlName.Quote(table); _timeout = commandTimeoutSeconds;
+    }
+
+    public string Table { get; }
+
+    /// <summary>Script di creazione della tabella (sql/002_endpoint_table.sql con le variabili sostituite).</summary>
+    public static string TableScript(string table)
+    {
+        var p = table.Split('.');
+        using var s = typeof(JsonPayloadWriter).Assembly.GetManifestResourceStream("RaftCore.sql.002_endpoint_table.sql")
+            ?? throw new InvalidOperationException("Script SQL incorporato mancante (002_endpoint_table.sql).");
+        using var r = new StreamReader(s);
+        return r.ReadToEnd().Replace("$(Schema)", p[0]).Replace("$(Table)", p[1]);
+    }
 
     public async Task WriteAsync(SqlConnection c, SqlTransaction tx, LogEntry e, string clusterId, CancellationToken ct)
     {
@@ -52,7 +81,8 @@ public sealed class JsonPayloadWriter : ISqlPayloadWriter
 /// <summary>
 /// State machine su SQL Server condiviso. Ogni apply è UNA transazione che:
 /// 1) blocca la riga di ApplyState (UPDLOCK, HOLDLOCK) e verifica LastApplied = LogIndex - 1;
-/// 2) decide l'esito (duplicato, conflitto, scaduta, scrittura applicativa) e lo registra in AppliedEntries/Requests;
+/// 2) decide l'esito (duplicato, conflitto, scaduta, endpoint sconosciuto, scrittura con il writer dell'endpoint) e lo registra
+///    in AppliedEntries/Requests;
 /// 3) avanza LastApplied.
 /// Un ex Leader o un nodo rientrato dopo settimane trova LastApplied già avanzato e non riscrive nulla.
 /// </summary>
@@ -64,14 +94,18 @@ public sealed class SqlServerDataRepository : IDataRepository
     private static readonly HashSet<int> TransientNumbers = new()
     { -2, -1, 2, 20, 53, 64, 121, 233, 1205, 1222, 4060, 4221, 10053, 10054, 10060, 10928, 10929, 40143, 40197, 40501, 40540, 40613, 49918, 49919, 49920, 615, 926, 18456 };
 
+    /// <summary>Versione dello schema delle tabelle di servizio (tabella SchemaVersion, REQ-VER-2).</summary>
+    public const int SchemaVersion = 2;
+
     private readonly SqlServerConfig _cfg;
     private readonly string _clusterId, _nodeId, _s;
-    private readonly ISqlPayloadWriter _writer;
+    private readonly IReadOnlyDictionary<string, ISqlPayloadWriter> _writers;
 
-    public SqlServerDataRepository(SqlServerConfig cfg, string clusterId, string nodeId, ISqlPayloadWriter? writer = null)
+    /// <param name="writers">Writer per nome di endpoint (EndpointConfig.Name). Una voce di un altro tipo viene registrata come Rejected.</param>
+    public SqlServerDataRepository(SqlServerConfig cfg, string clusterId, string nodeId, IReadOnlyDictionary<string, ISqlPayloadWriter> writers)
     {
         _cfg = cfg; _clusterId = clusterId; _nodeId = nodeId; _s = "[" + cfg.Schema + "]";
-        _writer = writer ?? new JsonPayloadWriter(cfg);
+        _writers = new Dictionary<string, ISqlPayloadWriter>(writers, StringComparer.Ordinal);
     }
 
     public static string SchemaScript(string schema)
@@ -87,18 +121,35 @@ public sealed class SqlServerDataRepository : IDataRepository
         await using var c = await OpenAsync(ct);
         if (_cfg.AutoCreateSchema)
         {
-            foreach (var batch in SplitBatches(SchemaScript(_cfg.Schema)))
+            var scripts = new List<string> { SchemaScript(_cfg.Schema) };
+            scripts.AddRange(_writers.Values.OfType<JsonPayloadWriter>().Select(w => w.Table).Distinct(StringComparer.OrdinalIgnoreCase).Select(JsonPayloadWriter.TableScript));
+            foreach (var batch in scripts.SelectMany(SplitBatches))
             {
                 await using var cmd = new SqlCommand(batch, c) { CommandTimeout = _cfg.CommandTimeoutSeconds };
                 await cmd.ExecuteNonQueryAsync(ct);
             }
         }
+        await CheckSchemaVersionAsync(c, ct);
         await using var ins = new SqlCommand(
             $"IF NOT EXISTS (SELECT 1 FROM {_s}.[ApplyState] WHERE ClusterId=@c) INSERT INTO {_s}.[ApplyState](ClusterId, LastApplied, UpdatedUtc, UpdatedBy) VALUES (@c, 0, SYSUTCDATETIME(), @n)", c)
         { CommandTimeout = _cfg.CommandTimeoutSeconds };
         ins.Parameters.Add("@c", SqlDbType.NVarChar, 100).Value = _clusterId;
         ins.Parameters.Add("@n", SqlDbType.NVarChar, 64).Value = _nodeId;
         await ins.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>REQ-VER-2: nessun apply su tabelle di servizio di un'altra versione (anche con AutoCreateSchema=false).</summary>
+    private async Task CheckSchemaVersionAsync(SqlConnection c, CancellationToken ct)
+    {
+        await using var cmd = new SqlCommand(
+            $"SELECT CASE WHEN OBJECT_ID(N'{_s}.[SchemaVersion]', N'U') IS NULL THEN -1 ELSE (SELECT MAX(Version) FROM {_s}.[SchemaVersion]) END", c)
+        { CommandTimeout = _cfg.CommandTimeoutSeconds };
+        var v = await cmd.ExecuteScalarAsync(ct);
+        int version = v is int i ? i : -1;
+        if (version != SchemaVersion)
+            throw new SchemaVersionException(version < 0
+                ? $"SchemaVersion: tabella {_s}.[SchemaVersion] assente o vuota (attesa versione {SchemaVersion}). Eseguire sql/001_init.sql o abilitare AutoCreateSchema; con tabelle di una versione precedente usare un database o uno schema nuovo."
+                : $"SchemaVersion: lo schema {_s} è alla versione {version}, attesa {SchemaVersion}. Usare un database o uno schema nuovo.");
     }
 
     internal static IEnumerable<string> SplitBatches(string script) =>
@@ -147,11 +198,13 @@ public sealed class SqlServerDataRepository : IDataRepository
                 }
                 else if (ctx.MaxPendingAge > TimeSpan.Zero && ctx.NowUtc - e.ReceivedUtc > ctx.MaxPendingAge)
                     outcome = Outcomes.Expired(e.Index, e.RequestId, e.ReceivedUtc);
+                else if (!_writers.TryGetValue(e.PayloadType, out var writer))
+                    outcome = Outcomes.Rejected(e.Index, e.RequestId, Outcomes.UnknownPayloadType(e.PayloadType));    // REQ-EPT-4
                 else
                 {
                     try
                     {
-                        await _writer.WriteAsync(c, tx, e, _clusterId, ct);
+                        await writer.WriteAsync(c, tx, e, _clusterId, ct);
                         outcome = Outcomes.Applied(e.Index, e.RequestId);
                     }
                     catch (Exception ex) when (IsPermanent(ex)) { business = ex; outcome = null!; }
@@ -180,7 +233,8 @@ public sealed class SqlServerDataRepository : IDataRepository
         if (pre != null) { await tx.CommitAsync(ct); return pre; }
         if (quarantineReason != null)
         {
-            await using var q = Cmd($"INSERT INTO {_s}.[Quarantine](ClusterId, LogIndex, RequestId, Payload, Reason, CreatedUtc) VALUES (@c, @i, @r, @p, @why, SYSUTCDATETIME())", c, tx);
+            await using var q = Cmd($"INSERT INTO {_s}.[Quarantine](ClusterId, LogIndex, RequestId, PayloadType, Payload, Reason, CreatedUtc) VALUES (@c, @i, @r, @pt, @p, @why, SYSUTCDATETIME())", c, tx);
+            q.Parameters.Add("@pt", SqlDbType.NVarChar, 64).Value = string.IsNullOrEmpty(e.PayloadType) ? DBNull.Value : e.PayloadType;
             q.Parameters.Add("@i", SqlDbType.BigInt).Value = e.Index;
             q.Parameters.Add("@r", SqlDbType.UniqueIdentifier).Value = Guid.TryParse(e.RequestId, out var g) ? g : DBNull.Value;
             q.Parameters.Add("@p", SqlDbType.VarBinary, -1).Value = e.Payload;
@@ -227,15 +281,16 @@ public sealed class SqlServerDataRepository : IDataRepository
     {
         Guid? rid = Guid.TryParse(e.RequestId, out var g) ? g : null;
         var sb = new StringBuilder();
-        sb.Append($"INSERT INTO {_s}.[AppliedEntries](ClusterId, LogIndex, RequestId, Status, HttpStatus, ResponseBody, AppliedUtc) VALUES (@c, @i, @r, @st, @http, @body, SYSUTCDATETIME());");
+        sb.Append($"INSERT INTO {_s}.[AppliedEntries](ClusterId, LogIndex, RequestId, PayloadType, Status, HttpStatus, ResponseBody, AppliedUtc) VALUES (@c, @i, @r, @pt, @st, @http, @body, SYSUTCDATETIME());");
         // la prima occorrenza di un RequestId (con qualunque esito terminale) entra nell'indice di idempotenza
         if (e.EntryType == LogEntryType.Data && rid != null && o.Status is ApplyStatus.Applied or ApplyStatus.Rejected or ApplyStatus.Expired or ApplyStatus.Quarantined)
-            sb.Append($"INSERT INTO {_s}.[Requests](ClusterId, RequestId, PayloadHash, LogIndex, Status, ReceivedUtc) VALUES (@c, @r, @h, @i, @st, @rcv);");
+            sb.Append($"INSERT INTO {_s}.[Requests](ClusterId, RequestId, PayloadType, PayloadHash, LogIndex, Status, ReceivedUtc) VALUES (@c, @r, @pt, @h, @i, @st, @rcv);");
         sb.Append($"UPDATE {_s}.[ApplyState] SET LastApplied=@i, UpdatedUtc=SYSUTCDATETIME(), UpdatedBy=@n WHERE ClusterId=@c AND LastApplied=@i - 1;");
         sb.Append("IF @@ROWCOUNT <> 1 THROW 51000, 'ApplyState: LastApplied modificato da un altro applicatore', 1;");
         await using var cmd = Cmd(sb.ToString(), c, tx);
         cmd.Parameters.Add("@i", SqlDbType.BigInt).Value = e.Index;
         cmd.Parameters.Add("@r", SqlDbType.UniqueIdentifier).Value = (object?)rid ?? DBNull.Value;
+        cmd.Parameters.Add("@pt", SqlDbType.NVarChar, 64).Value = e.EntryType == LogEntryType.Data ? e.PayloadType : DBNull.Value;
         cmd.Parameters.Add("@st", SqlDbType.TinyInt).Value = (byte)o.Status;
         cmd.Parameters.Add("@http", SqlDbType.SmallInt).Value = (short)o.HttpStatus;
         cmd.Parameters.Add("@body", SqlDbType.VarBinary, -1).Value = o.Body;

@@ -15,6 +15,7 @@ public sealed class WalMeta
     public long Term;
     public LogEntryType Type;
     public string RequestId = "";
+    public string PayloadType = "";
     public string PayloadHash = "";
     public long ReceivedTicks;
     internal WalSegment Segment = null!;
@@ -22,9 +23,10 @@ public sealed class WalMeta
     public int PayloadLen;
 }
 
-public readonly record struct WalInput(long Index, long Term, LogEntryType Type, string RequestId, string PayloadHash, long ReceivedTicks, ReadOnlyMemory<byte> Payload);
+public readonly record struct WalInput(long Index, long Term, LogEntryType Type, string RequestId, string PayloadType, string PayloadHash, long ReceivedTicks, ReadOnlyMemory<byte> Payload);
 
-public sealed record WalOpenResult(bool CorruptNonFinal, string? Message, long TruncatedBytes, bool HadData);
+/// <param name="FormatMismatch">Il WAL è stato scritto in un altro formato (es. dalla v0.2): non si recupera, l'avvio va bloccato (REQ-VER-2).</param>
+public sealed record WalOpenResult(bool CorruptNonFinal, string? Message, long TruncatedBytes, bool HadData, bool FormatMismatch = false);
 
 public sealed class WalIoException : IOException { public WalIoException(string m, Exception? inner = null) : base(m, inner) { } }
 
@@ -42,6 +44,8 @@ internal sealed class WalSegment
 /// <summary>
 /// WAL append-only a segmenti (REQ-WAL-1..3, REQ-SNP).
 /// Record: magic(4) ver(1) tipo(1) lunghezza(4) index(8) term(8) corpo(n) crc32c(4).
+/// Corpo di una voce (formato 2): tipo voce(1) ticks(8) len(2)+RequestId len(1)+PayloadHash len(1)+PayloadType payload.
+/// Un record con un'altra versione non è mai trattato come coda incompleta: blocca l'apertura (REQ-VER-2).
 /// - Il troncamento di voci in conflitto è un record "Truncate" appeso: i file non vengono mai riscritti.
 /// - La compattazione scrive snapshot.json (SnapshotIndex, SnapshotTerm) in modo durevole e poi elimina i segmenti
 ///   interamente precedenti: RAM e disco restano limitati alla finestra di log non ancora compattata.
@@ -50,7 +54,8 @@ internal sealed class WalSegment
 public sealed class WalLog : IDisposable
 {
     private const uint Magic = 0x4C415752;
-    private const byte Version = 1;
+    /// <summary>Formato dei record. 1 = v0.2 (senza PayloadType), 2 = v0.3.</summary>
+    public const byte Version = 2;
     private const byte RecEntry = 1, RecTruncate = 2;
     private const int HeaderSize = 26, CrcSize = 4;
     /// <summary>Limite di formato, indipendente dalla configurazione: ridurre MaxBodyBytes non rende "corrotti" record esistenti.</summary>
@@ -132,7 +137,7 @@ public sealed class WalLog : IDisposable
         if (m == null) return null;
         var payload = new byte[m.PayloadLen];
         if (m.PayloadLen > 0) ReadAt(m.Segment.H, m.PayloadOffset, payload);
-        return new LogEntry { Index = index, Term = m.Term, EntryType = m.Type, RequestId = m.RequestId, PayloadHash = m.PayloadHash,
+        return new LogEntry { Index = index, Term = m.Term, EntryType = m.Type, RequestId = m.RequestId, PayloadType = m.PayloadType, PayloadHash = m.PayloadHash,
             Payload = payload, ReceivedUtc = new DateTime(m.ReceivedTicks, DateTimeKind.Utc) };
     }
 
@@ -163,6 +168,11 @@ public sealed class WalLog : IDisposable
                     var seg = OpenSegment(files[fi].f, files[fi].n);
                     _segments.Add(seg);
                     if (seg.Length > 0) hadData = true;
+                    var foreign = ForeignVersion(seg);
+                    if (foreign != null)
+                        return new WalOpenResult(true, $"WAL in formato {foreign} in {Path.GetFileName(seg.Path)} (formato atteso {Version}): " +
+                            "creato da un'altra versione del servizio e non migrabile. Svuotare la DataDir e riavviare con Storage:AllowEmptyState=true " +
+                            "(vedere Operazioni → aggiornamento).", 0, true, FormatMismatch: true);
                     var r = ReplaySegment(seg, last, ref truncated);
                     if (r != null) return new WalOpenResult(true, r, 0, true);
                 }
@@ -170,6 +180,16 @@ public sealed class WalLog : IDisposable
             }
         }
         finally { _write.Release(); }
+    }
+
+    /// <summary>Versione del primo record del segmento se diversa da quella corrente; null se uguale o segmento vuoto/illeggibile.</summary>
+    private static byte? ForeignVersion(WalSegment seg)
+    {
+        if (seg.Length < HeaderSize) return null;
+        var hdr = new byte[HeaderSize];
+        ReadAt(seg.H, 0, hdr);
+        if (BinaryPrimitives.ReadUInt32LittleEndian(hdr) != Magic || hdr[4] == Version) return null;
+        return hdr[4];
     }
 
     private string? ReplaySegment(WalSegment seg, bool isLast, ref long truncated)
@@ -275,8 +295,10 @@ public sealed class WalLog : IDisposable
             int ridLen = BinaryPrimitives.ReadUInt16LittleEndian(body.AsSpan(p)); p += 2;
             var rid = Encoding.UTF8.GetString(body, p, ridLen); p += ridLen;
             int hl = body[p++]; var hash = Encoding.UTF8.GetString(body, p, hl); p += hl;
+            int tl = body[p++]; var ptype = Encoding.UTF8.GetString(body, p, tl); p += tl;
             if (p > bodyLen) return null;
-            return new WalMeta { Type = type, RequestId = rid, PayloadHash = hash, ReceivedTicks = ticks, Segment = seg, PayloadOffset = bodyOffset + p, PayloadLen = bodyLen - p };
+            return new WalMeta { Type = type, RequestId = rid, PayloadType = ptype, PayloadHash = hash, ReceivedTicks = ticks, Segment = seg,
+                PayloadOffset = bodyOffset + p, PayloadLen = bodyLen - p };
         }
         catch { return null; }
     }
@@ -330,8 +352,9 @@ public sealed class WalLog : IDisposable
             if (entries[i].Index != expected + i) throw new InvalidOperationException($"Indice non contiguo: {entries[i].Index}, atteso {expected + i}.");
         foreach (var e in entries)
         {
-            if (Encoding.UTF8.GetByteCount(e.RequestId) > ushort.MaxValue || Encoding.UTF8.GetByteCount(e.PayloadHash) > byte.MaxValue)
-                throw new InvalidOperationException("RequestId o PayloadHash troppo lunghi.");
+            if (Encoding.UTF8.GetByteCount(e.RequestId) > ushort.MaxValue || Encoding.UTF8.GetByteCount(e.PayloadHash) > byte.MaxValue
+                || Encoding.UTF8.GetByteCount(e.PayloadType ?? "") > byte.MaxValue)
+                throw new InvalidOperationException("RequestId, PayloadHash o PayloadType troppo lunghi.");
             if (e.Payload.Length > ClusterConfig.MaxBodyBytesLimit) throw new InvalidOperationException("Voce oltre il limite di formato del WAL.");
         }
         if (truncateFrom > snap + count) truncateFrom = 0; // troncamento oltre la fine: nulla da eliminare
@@ -349,9 +372,10 @@ public sealed class WalLog : IDisposable
             long maxIdx = truncateFrom;
             foreach (var e in entries)
             {
-                var rid = Encoding.UTF8.GetBytes(e.RequestId); var hash = Encoding.UTF8.GetBytes(e.PayloadHash);
-                if (rid.Length > ushort.MaxValue || hash.Length > byte.MaxValue) throw new InvalidOperationException("RequestId o PayloadHash troppo lunghi.");
-                int prefix = 1 + 8 + 2 + rid.Length + 1 + hash.Length;
+                var rid = Encoding.UTF8.GetBytes(e.RequestId); var hash = Encoding.UTF8.GetBytes(e.PayloadHash); var ptype = Encoding.UTF8.GetBytes(e.PayloadType ?? "");
+                if (rid.Length > ushort.MaxValue || hash.Length > byte.MaxValue || ptype.Length > byte.MaxValue)
+                    throw new InvalidOperationException("RequestId, PayloadHash o PayloadType troppo lunghi.");
+                int prefix = 1 + 8 + 2 + rid.Length + 1 + hash.Length + 1 + ptype.Length;
                 int bodyLen = prefix + e.Payload.Length;
                 if (bodyLen > MaxRecordBody) throw new InvalidOperationException("Voce oltre il limite di formato del WAL.");
                 var body = ArrayPool<byte>.Shared.Rent(bodyLen);
@@ -362,10 +386,11 @@ public sealed class WalLog : IDisposable
                     BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(p), (ushort)rid.Length); p += 2;
                     rid.CopyTo(body, p); p += rid.Length;
                     body[p++] = (byte)hash.Length; hash.CopyTo(body, p); p += hash.Length;
+                    body[p++] = (byte)ptype.Length; ptype.CopyTo(body, p); p += ptype.Length;
                     e.Payload.Span.CopyTo(body.AsSpan(p));
                     long start = off;
                     off += WriteRecord(seg, off, RecEntry, e.Index, e.Term, body.AsSpan(0, bodyLen));
-                    newMetas.Add(new WalMeta { Term = e.Term, Type = e.Type, RequestId = e.RequestId, PayloadHash = e.PayloadHash,
+                    newMetas.Add(new WalMeta { Term = e.Term, Type = e.Type, RequestId = e.RequestId, PayloadType = e.PayloadType ?? "", PayloadHash = e.PayloadHash,
                         ReceivedTicks = e.ReceivedTicks, Segment = seg, PayloadOffset = start + HeaderSize + prefix, PayloadLen = e.Payload.Length });
                     maxIdx = Math.Max(maxIdx, e.Index);
                 }

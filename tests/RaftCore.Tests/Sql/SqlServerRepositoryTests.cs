@@ -21,8 +21,13 @@ public sealed class SqlServerRepositoryTests : IAsyncLifetime
     private readonly string _schema = "t" + Guid.NewGuid().ToString("N")[..10];
     private readonly ApplyContext _ctx = new(DateTime.UtcNow, TimeSpan.FromHours(1), "c1");
 
-    private SqlServerConfig Cfg() => new() { ConnectionString = Conn!, Schema = _schema, DataTable = _schema + ".IngestedData", AutoCreateSchema = true };
-    private SqlServerDataRepository Repo(string node = "n1") => new(Cfg(), "c1", node);
+    private SqlServerConfig Cfg(bool autoCreate = true) => new() { ConnectionString = Conn!, Schema = _schema, AutoCreateSchema = autoCreate };
+    private Dictionary<string, ISqlPayloadWriter> Writers() => new()
+    {
+        ["misure"] = new JsonPayloadWriter(_schema + ".Misure", 30),
+        ["eventi"] = new JsonPayloadWriter(_schema + ".Eventi", 30)
+    };
+    private SqlServerDataRepository Repo(string node = "n1", bool autoCreate = true) => new(Cfg(autoCreate), "c1", node, Writers());
 
     public Task InitializeAsync() => Task.CompletedTask;
 
@@ -30,7 +35,7 @@ public sealed class SqlServerRepositoryTests : IAsyncLifetime
     {
         if (Conn == null) return;
         await using var c = new SqlConnection(Conn); await c.OpenAsync();
-        foreach (var t in new[] { "IngestedData", "Quarantine", "Requests", "AppliedEntries", "ApplyState" })
+        foreach (var t in new[] { "Misure", "Eventi", "Quarantine", "Requests", "AppliedEntries", "ApplyState", "SchemaVersion" })
             await new SqlCommand($"IF OBJECT_ID(N'[{_schema}].[{t}]') IS NOT NULL DROP TABLE [{_schema}].[{t}]", c).ExecuteNonQueryAsync();
         await new SqlCommand($"IF SCHEMA_ID(N'{_schema}') IS NOT NULL EXEC(N'DROP SCHEMA [{_schema}]')", c).ExecuteNonQueryAsync();
     }
@@ -39,6 +44,12 @@ public sealed class SqlServerRepositoryTests : IAsyncLifetime
     {
         await using var c = new SqlConnection(Conn); await c.OpenAsync();
         return Convert.ToInt64(await new SqlCommand($"SELECT COUNT(*) FROM [{_schema}].[{table}]", c).ExecuteScalarAsync());
+    }
+
+    private async Task Exec(string sql)
+    {
+        await using var c = new SqlConnection(Conn); await c.OpenAsync();
+        await new SqlCommand(sql, c).ExecuteNonQueryAsync();
     }
 
     [SkippableFact]
@@ -57,11 +68,51 @@ public sealed class SqlServerRepositoryTests : IAsyncLifetime
         Assert.Equal(ApplyStatus.Rejected, (await r.ApplyAsync(SharedFileRepositoryTests.Entry(6, "[1]"), _ctx, default)).Status);
         Assert.Equal(ApplyStatus.Quarantined, (await r.QuarantineAsync(SharedFileRepositoryTests.Entry(7, "{\"p\":1}"), "boom", _ctx, default)).Status);
         Assert.Equal(7, await r.GetLastAppliedIndexAsync(default));
-        Assert.Equal(1, await Count("IngestedData"));
+        Assert.Equal(1, await Count("Misure"));
         Assert.Equal(1, await Count("Quarantine"));
         Assert.True((await r.ApplyAsync(SharedFileRepositoryTests.Entry(2, "{\"v\":1}", rid), _ctx, default)).Replay);
         await Assert.ThrowsAsync<ApplyGapException>(() => r.ApplyAsync(SharedFileRepositoryTests.Entry(9, "{}"), _ctx, default));
         Assert.Equal(a.Body, (await r.GetOutcomeAsync(rid, default))!.Body);
+    }
+
+    [SkippableFact]
+    public async Task Each_endpoint_writes_its_own_table_and_ids_are_global_T58_T59_T61()
+    {
+        Skip.If(Conn == null, "RAFT_TEST_SQL non impostata");
+        var r = Repo(); await r.InitializeAsync(default);
+        var rid = Guid.NewGuid().ToString();
+        Assert.Equal(ApplyStatus.Applied, (await r.ApplyAsync(SharedFileRepositoryTests.Entry(1, "{\"m\":1}", payloadType: "misure"), _ctx, default)).Status);
+        Assert.Equal(ApplyStatus.Applied, (await r.ApplyAsync(SharedFileRepositoryTests.Entry(2, "{\"e\":1}", rid, payloadType: "eventi"), _ctx, default)).Status);
+        // stesso RequestId e stesso body su un altro endpoint: conflitto, nessuna scrittura
+        Assert.Equal(ApplyStatus.Conflict, (await r.ApplyAsync(SharedFileRepositoryTests.Entry(3, "{\"e\":1}", rid, payloadType: "misure"), _ctx, default)).Status);
+        // endpoint sconosciuto all'applicatore: rifiutata, LastApplied avanza
+        var unknown = await r.ApplyAsync(SharedFileRepositoryTests.Entry(4, "{}", payloadType: "ordini"), _ctx, default);
+        Assert.Equal(ApplyStatus.Rejected, unknown.Status);
+        Assert.Contains("ordini", Outcomes.BodyText(unknown));
+        Assert.Equal(4, await r.GetLastAppliedIndexAsync(default));
+        Assert.Equal(1, await Count("Misure"));
+        Assert.Equal(1, await Count("Eventi"));
+        await using var c = new SqlConnection(Conn); await c.OpenAsync();
+        var types = new List<string>();
+        await using (var rd = await new SqlCommand($"SELECT ISNULL(PayloadType, '') FROM [{_schema}].[AppliedEntries] ORDER BY LogIndex", c).ExecuteReaderAsync())
+            while (await rd.ReadAsync()) types.Add(rd.GetString(0));
+        Assert.Equal(new[] { "misure", "eventi", "misure", "ordini" }, types);
+    }
+
+    [SkippableFact]
+    public async Task Tables_of_another_schema_version_block_initialization_T66()
+    {
+        Skip.If(Conn == null, "RAFT_TEST_SQL non impostata");
+        await Repo().InitializeAsync(default);
+        await Exec($"UPDATE [{_schema}].[SchemaVersion] SET Version = 1");
+        var ex = await Assert.ThrowsAnyAsync<Exception>(() => Repo().InitializeAsync(default));           // AutoCreateSchema: lo script si ferma
+        Assert.Contains("SchemaVersion", ex.Message);
+        await Assert.ThrowsAsync<SchemaVersionException>(() => Repo(autoCreate: false).InitializeAsync(default));
+        // layout della v0.2: tabelle di servizio senza SchemaVersion
+        await Exec($"DROP TABLE [{_schema}].[SchemaVersion]");
+        ex = await Assert.ThrowsAnyAsync<Exception>(() => Repo().InitializeAsync(default));
+        Assert.Contains("SchemaVersion", ex.Message);
+        Assert.Equal(0, await Count("AppliedEntries"));
     }
 
     [SkippableFact]
@@ -83,14 +134,14 @@ public sealed class SqlServerRepositoryTests : IAsyncLifetime
         }
         await Task.WhenAll(Run(a), Run(b));
         Assert.Equal(40, await a.GetLastAppliedIndexAsync(default));
-        Assert.Equal(40, await Count("IngestedData"));
+        Assert.Equal(40, await Count("Misure"));
     }
 
     [SkippableFact]
     public async Task Constraint_violation_from_custom_writer_is_recorded_as_rejected()
     {
         Skip.If(Conn == null, "RAFT_TEST_SQL non impostata");
-        var r = new SqlServerDataRepository(Cfg(), "c1", "n1", new FailingWriter(547));
+        var r = new SqlServerDataRepository(Cfg(), "c1", "n1", new Dictionary<string, ISqlPayloadWriter> { ["misure"] = new FailingWriter(547) });
         await r.InitializeAsync(default);
         var o = await r.ApplyAsync(SharedFileRepositoryTests.Entry(1, "{}"), _ctx, default);
         Assert.Equal(ApplyStatus.Rejected, o.Status);
@@ -124,26 +175,28 @@ public sealed class SqlServerClusterTests
         c.Extra["RaftCluster:StateMachine:Provider"] = "SqlServer";
         c.Extra["RaftCluster:StateMachine:SqlServer:ConnectionString"] = Conn;
         c.Extra["RaftCluster:StateMachine:SqlServer:Schema"] = schema;
-        c.Extra["RaftCluster:StateMachine:SqlServer:DataTable"] = schema + ".IngestedData";
+        c.Extra["RaftCluster:Endpoints:0:Table"] = schema + ".Misure";
+        c.Extra["RaftCluster:Endpoints:1:Table"] = schema + ".Eventi";
         await c.StartAllAsync();
         int l = await c.WaitForLeaderAsync(TimeSpan.FromSeconds(30));
         int entry = c.Running.First(i => i != l);
+        static string Path(int k) => k % 2 == 0 ? TestCluster.MisurePath : TestCluster.EventiPath;
         var ids = Enumerable.Range(0, 60).Select(_ => Guid.NewGuid().ToString()).ToList();
         var tasks = new List<Task<(int Status, string Body, HttpResponseMessage Resp)>>();
         for (int k = 0; k < ids.Count; k++)
         {
-            tasks.Add(c.PostAsync(entry, ids[k], $"{{\"k\":{k}}}"));
+            tasks.Add(c.PostAsync(entry, ids[k], $"{{\"k\":{k}}}", path: Path(k)));
             if (k == 20) _ = c.StopAsync(l);
             await Task.Delay(30);
         }
         var res = await Task.WhenAll(tasks);
         for (int k = 0; k < ids.Count; k++)
-            for (int a = 0; res[k].Status != 200 && a < 5; a++) res[k] = await c.PostAsync(entry, ids[k], $"{{\"k\":{k}}}");
+            for (int a = 0; res[k].Status != 200 && a < 5; a++) res[k] = await c.PostAsync(entry, ids[k], $"{{\"k\":{k}}}", path: Path(k));
         Assert.All(res, r => Assert.Equal(200, r.Status));
         await using var conn = new SqlConnection(Conn); await conn.OpenAsync();
-        var count = Convert.ToInt64(await new SqlCommand($"SELECT COUNT(*) FROM [{schema}].[IngestedData]", conn).ExecuteScalarAsync());
-        var distinct = Convert.ToInt64(await new SqlCommand($"SELECT COUNT(DISTINCT RequestId) FROM [{schema}].[IngestedData]", conn).ExecuteScalarAsync());
-        Assert.Equal(60, count);
-        Assert.Equal(60, distinct);
+        async Task<long> Scalar(string sql) => Convert.ToInt64(await new SqlCommand(sql, conn).ExecuteScalarAsync());
+        Assert.Equal(30, await Scalar($"SELECT COUNT(*) FROM [{schema}].[Misure]"));
+        Assert.Equal(30, await Scalar($"SELECT COUNT(*) FROM [{schema}].[Eventi]"));
+        Assert.Equal(60, await Scalar($"SELECT COUNT(*) FROM (SELECT RequestId FROM [{schema}].[Misure] UNION SELECT RequestId FROM [{schema}].[Eventi]) u"));
     }
 }

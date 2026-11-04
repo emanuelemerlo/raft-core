@@ -84,7 +84,7 @@ public sealed class ProcessClusterTests : IDisposable
     {
         try
         {
-            using var req = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{_nodes[node].Port}/api/v1/data") { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+            using var req = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{_nodes[node].Port}/api/v1/misure") { Content = new StringContent(body, Encoding.UTF8, "application/json") };
             req.Headers.Add("X-Request-ID", id);
             using var r = await _http.SendAsync(req);
             return (int)r.StatusCode;

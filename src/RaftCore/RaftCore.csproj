@@ -24,6 +24,7 @@
   <ItemGroup>
     <None Include="..\..\sql\**\*.sql" Link="sql\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <EmbeddedResource Include="..\..\sql\001_init.sql" LogicalName="RaftCore.sql.001_init.sql" />
+    <EmbeddedResource Include="..\..\sql\002_endpoint_table.sql" LogicalName="RaftCore.sql.002_endpoint_table.sql" />
   </ItemGroup>
 
 </Project>

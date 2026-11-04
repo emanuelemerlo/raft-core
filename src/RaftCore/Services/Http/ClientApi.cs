@@ -1,26 +1,29 @@
 using System.Buffers;
 using System.Net.Sockets;
-using System.Security.Cryptography;
 using System.Text.Json;
 using RaftCore.Abstractions;
 using RaftCore.Configuration;
+using RaftCore.Models;
 using RaftCore.Services.Common;
 using RaftCore.Services.Core;
 
 namespace RaftCore.Services.Http;
 
-/// <summary>POST /api/v1/data: validazione, Smart Proxy (§15) e percorso sul Leader (REQ-PRX-9).</summary>
+/// <summary>
+/// Endpoint di ingestione configurati (REQ-EPT-1): validazione, Smart Proxy (§15) e percorso sul Leader (REQ-PRX-9).
+/// Un'unica istanza serve tutti gli endpoint: cambiano solo il path e il nome registrato nella voce del log.
+/// </summary>
 public sealed class ClientApi
 {
     public const string HForwardHops = "X-Forward-Hops", HForwardedBy = "X-Forwarded-By", HDeadline = "X-Raft-Deadline-Ms";
-    private const string DataPath = "/api/v1/data";
 
     private static readonly HashSet<string> HopByHop = new(StringComparer.OrdinalIgnoreCase)
     { "Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "TE", "Trailer", "Transfer-Encoding", "Upgrade", "Host", "Content-Length", "Proxy-Connection" };
 
     /// <summary>Header interni: mai copiati da una richiesta client né restituiti al client.</summary>
     private static readonly HashSet<string> Internal = new(StringComparer.OrdinalIgnoreCase)
-    { HForwardHops, HForwardedBy, HDeadline, RpcAuth.HNode, RpcAuth.HTime, RpcAuth.HNonce, RpcAuth.HSig, RpcAuth.HDest, RpcAuth.HExtra };
+    { HForwardHops, HForwardedBy, HDeadline, RpcAuth.HNode, RpcAuth.HTime, RpcAuth.HNonce, RpcAuth.HSig, RpcAuth.HDest, RpcAuth.HExtra,
+      RpcAuth.HProtocol, RpcAuth.HEndpoints };
 
     private readonly ClusterConfig _cfg;
     private readonly RaftNode _node;
@@ -35,7 +38,7 @@ public sealed class ClientApi
     public ClientApi(ClusterConfig cfg, RaftNode node, IClock clock, Metrics metrics, RpcVerifier verifier, IHttpClientFactory f, Membership members, ILogger<ClientApi> log)
     { _cfg = cfg; _node = node; _clock = clock; _metrics = metrics; _verifier = verifier; _http = f.CreateClient("forward"); _self = members.SelfId; _log = log; }
 
-    public async Task HandleAsync(HttpContext ctx)
+    public async Task HandleAsync(HttpContext ctx, EndpointConfig endpoint)
     {
         // REQ-PRX-10: limite sulle richieste in corso, PRIMA di leggere il body
         if (Interlocked.Increment(ref _inflight) > _cfg.MaxConcurrentRequests)
@@ -55,7 +58,7 @@ public sealed class ClientApi
             if (!ctx.Request.Headers.TryGetValue("X-Request-ID", out var ridV) || !Guid.TryParse(ridV.ToString(), out var rid))
             { await Reply(ctx, 400, "{\"error\":\"X-Request-ID mancante o non UUID\"}"); return; }
             string requestId = rid.ToString("D");
-            using var scope = _log.BeginScope(new Dictionary<string, object> { ["RequestId"] = requestId });
+            using var scope = _log.BeginScope(new Dictionary<string, object> { ["RequestId"] = requestId, ["Endpoint"] = endpoint.Name });
 
             // REQ-PRX-2 / API-2: 413 prima di inoltrare o scrivere
             if (ctx.Request.ContentLength is long cl && cl > _cfg.MaxBodyBytes) { await Reply(ctx, 413, "{\"error\":\"body troppo grande\"}"); return; }
@@ -76,7 +79,7 @@ public sealed class ClientApi
             }
             var body = new ReadOnlyMemory<byte>(buffer, 0, len);
             if (!IsValidJson(body.Span)) { await Reply(ctx, 400, "{\"error\":\"payload JSON non valido\"}"); return; }
-            string hash = Convert.ToHexString(SHA256.HashData(body.Span)).ToLowerInvariant();       // REQ-IDM-8
+            string hash = PayloadHashing.Compute(endpoint.Name, body.Span);                   // REQ-IDM-8, REQ-EPT-3
 
             // Gli header di inoltro valgono solo se la richiesta è un inoltro AUTENTICATO di un altro membro
             int hops = 0;
@@ -94,7 +97,7 @@ public sealed class ClientApi
                 else _metrics.Inc("forwardUntrustedHeaders");                             // header ignorati: richiesta trattata come client
             }
 
-            await RouteAsync(ctx, requestId, hash, body, hops, deadline);
+            await RouteAsync(ctx, endpoint, requestId, hash, body, hops, deadline);
         }
         catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested) { }
         catch (Exception ex)
@@ -112,7 +115,7 @@ public sealed class ClientApi
 
     internal static string ForwardExtra(string hops, string deadline, string requestId) => $"{hops}|{deadline}|{requestId}";
 
-    private async Task RouteAsync(HttpContext ctx, string requestId, string hash, ReadOnlyMemory<byte> body, int hops, long deadline)
+    private async Task RouteAsync(HttpContext ctx, EndpointConfig endpoint, string requestId, string hash, ReadOnlyMemory<byte> body, int hops, long deadline)
     {
         bool maybeDelivered = false;
         var ct = ctx.RequestAborted;
@@ -125,7 +128,7 @@ public sealed class ClientApi
             // --- sono (diventato) Leader: percorso locale
             if (_node.IsLeader)
             {
-                var r = await _node.WriteAsync(requestId, hash, body, deadline, ct);
+                var r = await _node.WriteAsync(requestId, endpoint.Name, hash, body, deadline, ct);
                 if (!r.NotLeader)
                 {
                     if (r.Status == 504) maybeDelivered = true;
@@ -155,7 +158,7 @@ public sealed class ClientApi
             // --- inoltro trasparente e firmato (REQ-PRX-1/3)
             try
             {
-                using var req = BuildForward(ctx, leader.Value.Id, leader.Value.Url, body, hops, deadline - _clock.MonotonicMs, requestId);
+                using var req = BuildForward(ctx, endpoint.Path, leader.Value.Id, leader.Value.Url, body, hops, deadline - _clock.MonotonicMs, requestId);
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 // Timeout PER TENTATIVO interno al deadline unico (REQ-PRX-8): oltre, il Leader è congelato o partizionato
                 // e si ritenta (sicuro grazie all'idempotenza) sul Leader corrente.
@@ -194,9 +197,10 @@ public sealed class ClientApi
         else { ctx.Response.Headers["Retry-After"] = "1"; ctx.Response.StatusCode = 503; }
     }
 
-    private HttpRequestMessage BuildForward(HttpContext ctx, string leaderId, string leaderUrl, ReadOnlyMemory<byte> body, int hops, long remainingMs, string requestId)
+    /// <summary>Inoltro al Leader sullo stesso path dell'endpoint (REQ-EPT-5): la firma copre il path.</summary>
+    private HttpRequestMessage BuildForward(HttpContext ctx, string path, string leaderId, string leaderUrl, ReadOnlyMemory<byte> body, int hops, long remainingMs, string requestId)
     {
-        var req = new HttpRequestMessage(HttpMethod.Post, leaderUrl.TrimEnd('/') + DataPath);
+        var req = new HttpRequestMessage(HttpMethod.Post, leaderUrl.TrimEnd('/') + path);
         var seg = Segment(body);
         req.Content = new ByteArrayContent(seg.Array!, seg.Offset, seg.Count); // stesso buffer, nessuna rilettura dello stream
         foreach (var hd in ctx.Request.Headers)
@@ -210,11 +214,12 @@ public sealed class ClientApi
         req.Headers.TryAddWithoutValidation(HForwardedBy, _self);
         req.Headers.TryAddWithoutValidation(HForwardHops, hopsV);
         req.Headers.TryAddWithoutValidation(HDeadline, deadlineV);
+        req.Headers.TryAddWithoutValidation(RpcAuth.HProtocol, ProtocolInfo.Version.ToString());
         req.Headers.TryAddWithoutValidation(RpcAuth.HNode, _self);
         req.Headers.TryAddWithoutValidation(RpcAuth.HTime, ts.ToString());
         req.Headers.TryAddWithoutValidation(RpcAuth.HNonce, nonce);
         req.Headers.TryAddWithoutValidation(RpcAuth.HDest, leaderId);
-        req.Headers.TryAddWithoutValidation(RpcAuth.HSig, RpcAuth.Sign(_cfg.ClusterSecret, "POST", DataPath, ts, body.Span, _self, nonce, leaderId,
+        req.Headers.TryAddWithoutValidation(RpcAuth.HSig, RpcAuth.Sign(_cfg.ClusterSecret, "POST", path, ts, body.Span, _self, nonce, leaderId,
             ForwardExtra(hopsV, deadlineV, requestId)));
         return req;
     }

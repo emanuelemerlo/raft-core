@@ -2,6 +2,7 @@ using RaftCore.Abstractions;
 using RaftCore.Configuration;
 using RaftCore.Models;
 using RaftCore.Services.Common;
+using RaftCore.Services.Http;
 using RaftCore.Services.Network;
 using RaftCore.Services.Storage;
 
@@ -19,7 +20,7 @@ public sealed class PeerProgress
     public readonly SemaphoreSlim Signal = new(0, 1);
 }
 public sealed record IdemRec(string Hash, long Index);
-internal sealed record PendingWrite(long Index, long Term, string RequestId, string Hash, byte[] Payload, long ReceivedTicks);
+internal sealed record PendingWrite(long Index, long Term, string RequestId, string PayloadType, string Hash, byte[] Payload, long ReceivedTicks);
 
 /// <summary>
 /// Sottoinsieme rigoroso di Raft: elezione (PreVote obbligatorio, leader stickiness), replica del log, commit,
@@ -38,6 +39,7 @@ public sealed class RaftNode : BackgroundService
     private readonly IClock _clock;
     private readonly Metrics _metrics;
     private readonly IDataRepository _repo;
+    private readonly EndpointCatalog _endpoints;
     private readonly ILogger<RaftNode> _log;
     private readonly WalLog _wal;
     private readonly RaftStateStore _store;
@@ -84,9 +86,9 @@ public sealed class RaftNode : BackgroundService
     public SemaphoreSlim AnnounceNow { get; } = new(0, 1);
 
     public RaftNode(ClusterConfig cfg, Membership members, PeerRegistry peers, IPeerTransport tx, IClock clock, Metrics metrics,
-        IDataRepository repo, ILogger<RaftNode> log)
+        IDataRepository repo, EndpointCatalog endpoints, ILogger<RaftNode> log)
     {
-        _cfg = cfg; _members = members; _peers = peers; _tx = tx; _clock = clock; _metrics = metrics; _repo = repo; _log = log;
+        _cfg = cfg; _members = members; _peers = peers; _tx = tx; _clock = clock; _metrics = metrics; _repo = repo; _endpoints = endpoints; _log = log;
         _self = members.SelfId;
         var dir = Path.GetFullPath(cfg.Storage.DataDir);
         Directory.CreateDirectory(dir);
@@ -120,6 +122,7 @@ public sealed class RaftNode : BackgroundService
             bool stateExists = _store.Exists;
             var open = _wal.Open();                                           // 1-2) validazione e troncamento del record finale incompleto
             if (open.TruncatedBytes > 0) _log.LogWarning("Recovery: troncati {B} byte di record finale incompleto", open.TruncatedBytes);
+            if (open.FormatMismatch) throw new StartupBlockedException(open.Message!);       // REQ-VER-2: nessuna migrazione dalla v0.2
             if (open.CorruptNonFinal) { SetRecoveryRequired(open.Message!); return; }   // 3)
 
             if (!stateExists && !open.HadData)
@@ -417,7 +420,7 @@ public sealed class RaftNode : BackgroundService
             _progress[id] = new PeerProgress { Next = last + 1, Match = 0, LastAckSendMs = granters.Contains(id) ? sendMs : long.MinValue / 2 };
         try
         {   // REQ-LDR-1: no-op nel term corrente
-            _wal.Append(0, new[] { new WalInput(last + 1, _term, LogEntryType.NoOp, Guid.NewGuid().ToString(), "", _clock.UtcNow.Ticks, default) });
+            _wal.Append(0, new[] { new WalInput(last + 1, _term, LogEntryType.NoOp, Guid.NewGuid().ToString(), "", "", _clock.UtcNow.Ticks, default) });
         }
         catch (IOException ex) { MarkIoFailure(ex); return; }
         _nextIndex = _wal.LastIndex + 1;
@@ -554,7 +557,7 @@ public sealed class RaftNode : BackgroundService
             }
             // eventuali segnali accumulati per lo stesso batch
             while (_writerSignal.CurrentCount > 0 && _writerSignal.Wait(0)) { }
-            var inputs = batch.Select(p => new WalInput(p.Index, p.Term, LogEntryType.Data, p.RequestId, p.Hash, p.ReceivedTicks, p.Payload)).ToList();
+            var inputs = batch.Select(p => new WalInput(p.Index, p.Term, LogEntryType.Data, p.RequestId, p.PayloadType, p.Hash, p.ReceivedTicks, p.Payload)).ToList();
             bool ok = false; Exception? err = null;
             try { ok = _wal.TryAppend(gen, inputs); }
             catch (Exception ex) { err = ex; }
@@ -614,7 +617,13 @@ public sealed class RaftNode : BackgroundService
             if (!leader) continue;
             try
             {
-                if (!_repoInitialized) { await _repo.InitializeAsync(ct); _repoInitialized = true; }
+                if (!_repoInitialized)
+                {
+                    try { await _repo.InitializeAsync(ct); }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    { StateMachineError(ex, "inizializzazione del database"); await DelaySafe(Backoff(transient++), ct); _applySignal.Release(); continue; }
+                    _repoInitialized = true;
+                }
                 if (!cursorKnown)
                 {
                     long db = await _repo.GetLastAppliedIndexAsync(ct);
@@ -641,6 +650,13 @@ public sealed class RaftNode : BackgroundService
                     e = _wal.ReadEntry(_lastApplied + 1);
                 }
                 if (e == null) break;
+                if (e.EntryType == LogEntryType.Data && !_endpoints.Contains(e.PayloadType))
+                {
+                    // REQ-EPT-4: il repository registra Rejected (deterministico); qui solo segnalazione
+                    _metrics.Inc("applyUnknownType");
+                    _log.LogError("Voce {Idx} (RequestId {Rid}) dell'endpoint '{Type}', non configurato su questo nodo: registrata come rifiutata. " +
+                        "Allineare Endpoints su tutti i nodi.", e.Index, e.RequestId, e.PayloadType);
+                }
                 ApplyOutcome o;
                 try
                 {
@@ -757,7 +773,8 @@ public sealed class RaftNode : BackgroundService
     }
 
     // ===================================================================== scrittura client (REQ-PRX-9, §12)
-    public async Task<WriteResult> WriteAsync(string requestId, string payloadHash, ReadOnlyMemory<byte> payload, long deadlineMs, CancellationToken ct)
+    /// <param name="payloadType">Nome dell'endpoint (REQ-EPT-2); payloadHash ne deve tenere conto (<see cref="PayloadHashing"/>).</param>
+    public async Task<WriteResult> WriteAsync(string requestId, string payloadType, string payloadHash, ReadOnlyMemory<byte> payload, long deadlineMs, CancellationToken ct)
     {
         TaskCompletionSource<ApplyOutcome?>? waiter = null; bool fromDb = false;
         lock (_mu)
@@ -774,7 +791,7 @@ public sealed class RaftNode : BackgroundService
             else
             {
                 long idx = _nextIndex++;
-                _pending.Add(new PendingWrite(idx, _term, requestId, payloadHash, payload.ToArray(), _clock.UtcNow.Ticks));
+                _pending.Add(new PendingWrite(idx, _term, requestId, payloadType, payloadHash, payload.ToArray(), _clock.UtcNow.Ticks));
                 _idem[requestId] = new IdemRec(payloadHash, idx);
                 waiter = GetWaiter(idx);
                 _writerSignal.Release();
@@ -924,7 +941,7 @@ public sealed class RaftNode : BackgroundService
                         if (e.Index <= _commit) { _log.LogCritical("{Ctx} tentativo di sovrascrivere la voce committed {I} (REQ-REP-4)", Ctx, e.Index); return (200, new AppendEntriesResponse { Term = _term, Success = false }); }
                         truncateFrom = e.Index;                                              // elimina la voce in conflitto e TUTTE le successive
                     }
-                    toAppend.Add(new WalInput(e.Index, e.Term, e.EntryType, e.RequestId, e.PayloadHash, e.ReceivedUtc.Ticks, e.Payload));
+                    toAppend.Add(new WalInput(e.Index, e.Term, e.EntryType, e.RequestId, e.PayloadType ?? "", e.PayloadHash, e.ReceivedUtc.Ticks, e.Payload));
                 }
                 if (truncateFrom > 0 || toAppend.Count > 0)
                 {
@@ -1024,7 +1041,9 @@ public sealed class RaftNode : BackgroundService
             return new
             {
                 nodeId = _self, url = _selfUrl, role = _role.ToString(), term = _term, leaderId = _leaderId, commitIndex = _commit, lastApplied = _lastApplied,
-                snapshotIndex = _wal.SnapshotIndex, lastLogIndex = _wal.LastIndex, membersHash = _members.Hash, healthy = StorageHealthy,
+                snapshotIndex = _wal.SnapshotIndex, lastLogIndex = _wal.LastIndex, membersHash = _members.Hash, protocolVersion = ProtocolInfo.Version,
+                endpointsHash = _endpoints.Hash, endpointsMismatch = _endpoints.MismatchedNodes(),
+                endpoints = _endpoints.Endpoints.Select(x => new { name = x.Name, path = x.Path }).ToList(), healthy = StorageHealthy,
                 unhealthyReason = _unhealthyReason, stateMachineHealthy = _smHealthy, stateMachineError = _smError,
                 peers = _peers.GetVisiblePeers().Select(p => new { p.NodeId, Url = p.BestUrl, p.RpcUrl, p.UdpUrl, p.StaticUrl, p.GossipUrl, Role = p.Role.ToString(), p.Term }).ToList()
             };

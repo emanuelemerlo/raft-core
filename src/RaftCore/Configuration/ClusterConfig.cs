@@ -77,13 +77,23 @@ public class SharedFileConfig
     public int LockTimeoutMs { get; set; } = 5_000;
 }
 
+/// <summary>
+/// Elemento di "Endpoints": un endpoint POST di ingestione (REQ-EPT-1). Name viene registrato in ogni voce del log e
+/// sceglie il writer all'apply; Path è solo l'indirizzo HTTP e si può cambiare; Table è la destinazione del writer JSON di default.
+/// </summary>
+public class EndpointConfig
+{
+    public string Name { get; set; } = string.Empty;
+    public string Path { get; set; } = string.Empty;
+    /// <summary>Tabella schema.tabella del writer JSON di default (Provider=SqlServer). Facoltativa con un writer registrato per Name.</summary>
+    public string? Table { get; set; }
+}
+
 public class SqlServerConfig
 {
     /// <summary>Stringa di connessione. In produzione da variabile d'ambiente RAFT_SQL_CONNECTION (REQ-SEC-1).</summary>
     public string ConnectionString { get; set; } = string.Empty;
     public string Schema { get; set; } = "raft";
-    /// <summary>Tabella applicativa scritta dal writer di default (JsonPayloadWriter).</summary>
-    public string DataTable { get; set; } = "raft.IngestedData";
     public int CommandTimeoutSeconds { get; set; } = 30;
     public bool AutoCreateSchema { get; set; } = true;
 }
@@ -117,6 +127,9 @@ public class ManagementConfig
 public class ClusterConfig
 {
     public const long MaxBodyBytesLimit = 64L * 1024 * 1024;
+    public const int MaxEndpoints = 64;
+    /// <summary>Prefissi di path usati dal servizio: un endpoint di ingestione non può stare sotto di essi.</summary>
+    public static readonly string[] ReservedPathPrefixes = { "/internal", "/health", "/api/v1/cluster", "/api/v1/metrics" };
 
     public string ClusterId { get; set; } = string.Empty;
     public int ClusterSize { get; set; }
@@ -181,8 +194,33 @@ public class ClusterConfig
     public bool TestMode { get; set; } = false;
     /// <summary>URL statici dei peer (seed), NodeId -> URL. Utili senza broadcast; gli URL vengono poi propagati dal Leader.</summary>
     public Dictionary<string, string> Peers { get; set; } = new();
+    /// <summary>Endpoint di ingestione (REQ-EPT-1): almeno uno, identici su tutti i nodi.</summary>
+    public List<EndpointConfig> Endpoints { get; set; } = new();
 
     public int Quorum => ClusterSize / 2 + 1;
+
+    /// <summary>Impronta della configurazione degli endpoint (nome, path e tabella, senza distinzione di maiuscole), confrontata tra i nodi.</summary>
+    public static string ComputeEndpointsHash(IEnumerable<EndpointConfig> endpoints)
+    {
+        var raw = string.Join("\n", endpoints
+            .Select(e => $"{e.Name.Trim()}|{e.Path.Trim()}|{e.Table?.Trim()}".ToLowerInvariant())
+            .OrderBy(x => x, StringComparer.Ordinal));
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(raw))).ToLowerInvariant()[..16];
+    }
+
+    /// <summary>Nome di endpoint ammesso: [a-z0-9][a-z0-9_-]{0,63}.</summary>
+    public static bool IsValidEndpointName(string s) =>
+        !string.IsNullOrEmpty(s) && s.Length <= 64 && IsLowerAlnum(s[0]) && s.All(c => IsLowerAlnum(c) || c is '-' or '_');
+
+    private static bool IsLowerAlnum(char c) => c is >= 'a' and <= 'z' or >= '0' and <= '9';
+
+    /// <summary>Path di endpoint ammesso: assoluto, segmenti non vuoti di caratteri non riservati, senza '/' finale né parametri.</summary>
+    public static bool IsValidEndpointPath(string s) =>
+        s.Length is > 1 and <= 200 && s[0] == '/' && s[^1] != '/'
+        && s[1..].Split('/').All(seg => seg.Length > 0 && seg != "." && seg != ".." && seg.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.' or '~'));
+
+    public static bool IsReservedPath(string path) =>
+        ReservedPathPrefixes.Any(p => path.Equals(p, StringComparison.OrdinalIgnoreCase) || path.StartsWith(p + "/", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>Normalizza un NodeId (GUID) in forma canonica minuscola.</summary>
     public static string Norm(string id) => Guid.TryParse(id, out var g) ? g.ToString("D") : id;
@@ -253,6 +291,12 @@ public class ClusterConfig
         // gli override (variabili d'ambiente, riga di comando) non possono accorciare un array: le voci vuote si ignorano
         Members = Members.Where(m => !string.IsNullOrWhiteSpace(m)).ToList();
         foreach (var k in Peers.Where(kv => string.IsNullOrWhiteSpace(kv.Value)).Select(kv => kv.Key).ToList()) Peers.Remove(k);
+        Endpoints = Endpoints.Where(e => !string.IsNullOrWhiteSpace(e.Name) || !string.IsNullOrWhiteSpace(e.Path)).ToList();
+        foreach (var e in Endpoints)
+        {
+            e.Name = e.Name.Trim(); e.Path = e.Path.Trim();
+            e.Table = string.IsNullOrWhiteSpace(e.Table) ? null : e.Table.Trim();
+        }
         var v = new List<string>();
         if (string.IsNullOrWhiteSpace(ClusterId)) v.Add("ClusterId è obbligatorio.");
         if (ClusterSize < 1 || ClusterSize > 7) v.Add($"1 <= ClusterSize <= 7 (valore: {ClusterSize}).");
@@ -313,12 +357,47 @@ public class ClusterConfig
         {
             if (string.IsNullOrWhiteSpace(sm.SqlServer.ConnectionString))
                 v.Add("StateMachine.SqlServer.ConnectionString obbligatoria (variabile d'ambiente RAFT_SQL_CONNECTION).");
-            if (!SqlName.IsValidQualified(sm.SqlServer.DataTable)) v.Add("StateMachine.SqlServer.DataTable non valido (atteso schema.tabella).");
             if (!SqlName.IsValid(sm.SqlServer.Schema)) v.Add("StateMachine.SqlServer.Schema non valido.");
         }
+        ValidateEndpoints(v);
 
         if (v.Count > 0) throw new ConfigurationValidationException(v);
     }
+
+    private void ValidateEndpoints(List<string> v)
+    {
+        if (Endpoints.Count == 0) { v.Add("Endpoints: configurare almeno un endpoint di ingestione (Name, Path, Table)."); return; }
+        if (Endpoints.Count > MaxEndpoints) v.Add($"Endpoints: al massimo {MaxEndpoints} endpoint (configurati {Endpoints.Count}).");
+        for (int i = 0; i < Endpoints.Count; i++)
+        {
+            var e = Endpoints[i];
+            string at = $"Endpoints[{i}]" + (e.Name.Length > 0 ? $" ({e.Name})" : "");
+            if (!IsValidEndpointName(e.Name))
+                v.Add($"{at}: Name '{e.Name}' non valido (minuscole, cifre, '-' e '_', massimo 64 caratteri, inizia con lettera o cifra).");
+            if (!IsValidEndpointPath(e.Path))
+                v.Add($"{at}: Path '{e.Path}' non valido (assoluto, es. /api/v1/misure, senza '/' finale né parametri).");
+            else if (IsReservedPath(e.Path))
+                v.Add($"{at}: Path '{e.Path}' riservato al servizio ({string.Join(", ", ReservedPathPrefixes)}).");
+            if (e.Table != null && !SqlName.IsValidQualified(e.Table))
+                v.Add($"{at}: Table '{e.Table}' non valida (atteso schema.tabella).");
+        }
+        foreach (var g in Endpoints.Where(e => e.Name.Length > 0).GroupBy(e => e.Name, StringComparer.Ordinal).Where(g => g.Count() > 1))
+            v.Add($"Endpoints: Name '{g.Key}' duplicato.");
+        foreach (var g in Endpoints.Where(e => e.Path.Length > 0).GroupBy(e => e.Path, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
+            v.Add($"Endpoints: Path '{g.Key}' duplicato.");
+        foreach (var g in Endpoints.Where(e => e.Table != null).GroupBy(e => e.Table!, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
+            v.Add($"Endpoints: Table '{g.Key}' usata da più endpoint ({string.Join(", ", g.Select(e => e.Name))}).");
+        if (StateMachine.Provider == StateMachineProvider.SqlServer)
+        {
+            var schema = StateMachine.SqlServer.Schema;
+            foreach (var e in Endpoints.Where(e => e.Table != null && e.Table.Split('.')[0].Equals(schema, StringComparison.OrdinalIgnoreCase)
+                         && ServiceTables.Contains(e.Table.Split('.')[1], StringComparer.OrdinalIgnoreCase)))
+                v.Add($"Endpoints ({e.Name}): Table '{e.Table}' coincide con una tabella di servizio.");
+        }
+    }
+
+    /// <summary>Tabelle di servizio create da sql/001_init.sql nello schema StateMachine:SqlServer:Schema.</summary>
+    public static readonly string[] ServiceTables = { "SchemaVersion", "ApplyState", "AppliedEntries", "Requests", "Quarantine" };
 }
 
 /// <summary>Validazione minima dei nomi SQL configurabili (evita injection nei nomi di schema/tabella).</summary>

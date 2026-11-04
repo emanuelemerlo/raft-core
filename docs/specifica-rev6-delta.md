@@ -86,7 +86,7 @@ Una configurazione non valida impedisce l'avvio (codice 1). La configurazione de
 
 Quando serve isolamento si avviano **cluster distinti**, ciascuno con un proprio `ClusterId` e i propri endpoint, anche sullo stesso database: le tabelle di servizio sono già partizionate per `ClusterId`.
 
-**REQ-VER-1 (versione di protocollo).** Ogni RPC tra nodi e ogni annuncio UDP DEVONO contenere `ProtocolVersion`. Un nodo DEVE rifiutare le RPC e ignorare gli annunci con una versione diversa dalla propria: un nodo di versione incompatibile non vota, non riceve voci e non conta nel quorum. Ogni RPC contiene anche `EndpointsHash`, l'impronta della configurazione degli endpoint; un valore diverso NON blocca le RPC, così da permettere un aggiornamento della configurazione un nodo alla volta, ma DEVE essere segnalato (log, metrica `endpointsHashMismatch`, campo `endpointsMismatch` dello stato).
+**REQ-VER-1 (versione di protocollo).** Ogni RPC tra nodi e ogni annuncio UDP DEVONO contenere `ProtocolVersion`, incluso nella firma HMAC di richieste, risposte e annunci. Un nodo DEVE rifiutare le RPC e ignorare gli annunci con una versione diversa dalla propria: un nodo di versione incompatibile non vota, non riceve voci e non conta nel quorum. Ogni RPC e ogni risposta firmata contengono anche `EndpointsHash`, l'impronta della configurazione degli endpoint; un valore diverso NON blocca le RPC, così da permettere un aggiornamento della configurazione un nodo alla volta, ma DEVE essere segnalato (log, metrica `endpointsHashMismatch`, campo `endpointsMismatch` dello stato).
 
 **REQ-VER-2 (dati di formato precedente).** Non è prevista migrazione dalla v0.2.
 - Un WAL in formato 1 DEVE bloccare l'avvio (codice 2) con un messaggio che indica di svuotare la `DataDir`.

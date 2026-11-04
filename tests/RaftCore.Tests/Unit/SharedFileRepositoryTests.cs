@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using System.Text;
 using RaftCore.Abstractions;
 using RaftCore.Configuration;
@@ -13,17 +12,19 @@ public class SharedFileRepositoryTests
 {
     private static readonly ApplyContext Ctx = new(DateTime.UtcNow, TimeSpan.FromHours(1), "c1");
 
-    internal static LogEntry Entry(long idx, string json, string? rid = null, DateTime? received = null, LogEntryType type = LogEntryType.Data)
+    internal static LogEntry Entry(long idx, string json, string? rid = null, DateTime? received = null, LogEntryType type = LogEntryType.Data,
+        string payloadType = "misure")
     {
         var p = Encoding.UTF8.GetBytes(json);
+        if (type != LogEntryType.Data) payloadType = "";
         return new LogEntry
         {
-            Index = idx, Term = 1, EntryType = type, RequestId = rid ?? Guid.NewGuid().ToString(), Payload = p,
-            PayloadHash = Convert.ToHexString(SHA256.HashData(p)).ToLowerInvariant(), ReceivedUtc = received ?? DateTime.UtcNow
+            Index = idx, Term = 1, EntryType = type, RequestId = rid ?? Guid.NewGuid().ToString(), PayloadType = payloadType, Payload = p,
+            PayloadHash = PayloadHashing.Compute(payloadType, p), ReceivedUtc = received ?? DateTime.UtcNow
         };
     }
 
-    private static SharedFileDataRepository Repo(string dir) => new(new SharedFileConfig { Directory = dir }, fsync: true);
+    private static SharedFileDataRepository Repo(string dir) => new(new SharedFileConfig { Directory = dir }, fsync: true, new[] { "misure", "eventi" });
 
     [Fact]
     public async Task Applies_in_order_and_replays_already_applied_entries()
@@ -39,6 +40,45 @@ public class SharedFileRepositoryTests
         Assert.Equal(o1.Body, again.Body);
         Assert.Equal(1, await r.GetLastAppliedIndexAsync(default));
         await Assert.ThrowsAsync<ApplyGapException>(() => r.ApplyAsync(Entry(3, "{}"), Ctx, default));
+    }
+
+    [Fact]
+    public async Task Entries_carry_their_endpoint_and_unknown_endpoints_are_rejected_T61()
+    {
+        using var d = new TempDir();
+        var r = Repo(d.Path); await r.InitializeAsync(default);
+        Assert.Equal(ApplyStatus.Applied, (await r.ApplyAsync(Entry(1, "{\"a\":1}", payloadType: "eventi"), Ctx, default)).Status);
+        var o = await r.ApplyAsync(Entry(2, "{\"a\":2}", payloadType: "ordini"), Ctx, default);
+        Assert.Equal(ApplyStatus.Rejected, o.Status);
+        Assert.Equal(422, o.HttpStatus);
+        Assert.Contains("ordini", Outcomes.BodyText(o));
+        Assert.Equal(2, await r.GetLastAppliedIndexAsync(default));              // il cluster prosegue
+        Assert.Equal(ApplyStatus.Applied, (await r.ApplyAsync(Entry(3, "{\"a\":3}"), Ctx, default)).Status);
+        var lines = File.ReadAllLines(r.FilePath).Select(l => l.Split('\t')).ToList();
+        Assert.All(lines, f => Assert.Equal(8, f.Length));
+        Assert.Equal(new[] { "eventi", "ordini", "misure" }, lines.Select(f => f[3]));
+    }
+
+    [Fact]
+    public async Task Same_request_id_on_another_endpoint_is_a_conflict_T59()
+    {
+        using var d = new TempDir();
+        var r = Repo(d.Path); await r.InitializeAsync(default);
+        var rid = Guid.NewGuid().ToString();
+        Assert.Equal(ApplyStatus.Applied, (await r.ApplyAsync(Entry(1, "{\"a\":1}", rid, payloadType: "misure"), Ctx, default)).Status);
+        var o = await r.ApplyAsync(Entry(2, "{\"a\":1}", rid, payloadType: "eventi"), Ctx, default);   // stesso body, altro endpoint
+        Assert.Equal(ApplyStatus.Conflict, o.Status);
+        Assert.Equal(422, o.HttpStatus);
+    }
+
+    [Fact]
+    public async Task Applied_log_of_the_previous_format_is_refused()
+    {
+        using var d = new TempDir();
+        await File.WriteAllTextAsync(Path.Combine(d.Path, "applied.log"), "1\t1\t" + Guid.NewGuid() + "\thash\t200\t\t\n");   // 7 campi (v0.2)
+        var r = Repo(d.Path);
+        var ex = await Assert.ThrowsAsync<InvalidDataException>(() => r.InitializeAsync(default));
+        Assert.Contains("versione precedente", ex.Message);
     }
 
     [Fact]
@@ -88,7 +128,7 @@ public class SharedFileRepositoryTests
         Assert.Equal(ApplyStatus.Expired, o.Status);
         Assert.Equal(410, o.HttpStatus);
         var line = File.ReadAllLines(r.FilePath).Single().Split('\t');
-        Assert.Equal("", line[6]);                                                    // nessun dato scritto
+        Assert.Equal("", line[7]);                                                    // nessun dato scritto
         Assert.Equal(ApplyStatus.Expired, (await r.GetOutcomeAsync(old.RequestId, default))!.Status);
         // disattivato con MaxPendingAge = 0
         var o2 = await r.ApplyAsync(Entry(2, "{\"stale\":true}", received: DateTime.UtcNow.AddDays(-14)), Ctx with { MaxPendingAge = TimeSpan.Zero }, default);

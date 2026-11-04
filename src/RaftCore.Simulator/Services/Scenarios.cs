@@ -31,6 +31,8 @@ public sealed class ScenarioRunner
         new ScenarioInfo("too-large", "Body oltre MaxBodyBytes", "413, senza inoltro né scrittura", "T34 · REQ-PRX-2"),
         new ScenarioInfo("spoofed-headers", "Client che invia X-Forward-Hops e X-Forwarded-By", "200: header di inoltro non firmati ignorati (mai 421 al client)", "REQ-API-2 · rev. 6 PRX-3/6"),
         new ScenarioInfo("no-content-type", "Body JSON senza Content-Type", "200: conta il body, non l'header", "REQ-API-1"),
+        new ScenarioInfo("cross-endpoint", "Stesso ID su due endpoint diversi", "200, poi 422; una sola scrittura", "T59 · REQ-EPT-3"),
+        new ScenarioInfo("unknown-path", "Path non configurato", "404, nessuna scrittura", "T60 · REQ-EPT-1"),
     };
 
     public ScenarioRunner(SimulatorOptions opt, DataClient client, ClusterMonitor monitor, AppliedLogVerifier verifier, LoadGenerator gen, EventLog events)
@@ -59,13 +61,17 @@ public sealed class ScenarioRunner
         return (preferFollower ? nodes.FirstOrDefault(n => n.Role != "Leader") : null) ?? nodes[0];
     }
 
+    /// <summary>Endpoint usato dagli scenari: il primo esposto dal cluster.</summary>
+    private SimEndpoint Ep() => _monitor.KnownEndpoints().FirstOrDefault()
+        ?? throw new SimulatorException("Nessun endpoint noto: i nodi non hanno ancora risposto con il loro stato");
+
     private byte[] Body(string scenario, string extra = "") =>
         Encoding.UTF8.GetBytes($"{{\"scenario\":\"{scenario}\",\"timestamp\":\"{DateTimeOffset.Now:O}\",\"runId\":\"{_gen.RunId}\"{extra}}}");
 
     private async Task<PostResult> Post(List<ScenarioStep> steps, string label, NodeView node, string? id, byte[] body,
-        IEnumerable<KeyValuePair<string, string>>? headers, CancellationToken ct, string? note = null)
+        IEnumerable<KeyValuePair<string, string>>? headers, CancellationToken ct, string? note = null, string? path = null)
     {
-        var r = await _client.PostDataAsync(node.Url, id, body, _opt.RequestTimeoutMs, headers, ct);
+        var r = await _client.PostDataAsync(node.Url, path ?? Ep().Path, id, body, _opt.RequestTimeoutMs, headers, ct);
         steps.Add(new ScenarioStep(label, node.Port, r.Status, r.Replay, r.ElapsedMs, note ?? r.Error ?? (r.Status >= 300 ? r.Body : null)));
         return r;
     }
@@ -96,7 +102,8 @@ public sealed class ScenarioRunner
             {
                 var body = Body(id);
                 var nodes = _monitor.Reachable();
-                var tasks = Enumerable.Range(0, 10).Select(i => _client.PostDataAsync(nodes[i % nodes.Count].Url, rid, body, _opt.RequestTimeoutMs, ct: ct)).ToList();
+                var path = Ep().Path;
+                var tasks = Enumerable.Range(0, 10).Select(i => _client.PostDataAsync(nodes[i % nodes.Count].Url, path, rid, body, _opt.RequestTimeoutMs, ct: ct)).ToList();
                 var res = await Task.WhenAll(tasks);
                 for (int i = 0; i < res.Length; i++)
                     steps.Add(new ScenarioStep($"Richiesta {i + 1}", nodes[i % nodes.Count].Port, res[i].Status, res[i].Replay, res[i].ElapsedMs, res[i].Error));
@@ -146,7 +153,7 @@ public sealed class ScenarioRunner
             {
                 // DataClient imposta sempre Content-Type: qui si usa una richiesta costruita a mano
                 var body = Body(id);
-                using var req = new HttpRequestMessage(HttpMethod.Post, node.Url + "/api/v1/data") { Content = new ByteArrayContent(body) };
+                using var req = new HttpRequestMessage(HttpMethod.Post, node.Url + Ep().Path) { Content = new ByteArrayContent(body) };
                 req.Headers.TryAddWithoutValidation("X-Request-ID", rid);
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 int status;
@@ -154,6 +161,23 @@ public sealed class ScenarioRunner
                 catch (HttpRequestException ex) { status = 0; steps.Add(new ScenarioStep("POST senza Content-Type", node.Port, 0, false, sw.ElapsedMilliseconds, ex.Message)); return (false, "Errore di rete"); }
                 steps.Add(new ScenarioStep("POST senza Content-Type", node.Port, status, false, sw.ElapsedMilliseconds, null));
                 return (status == 200, $"Risposta {status}");
+            }
+            case "cross-endpoint":
+            {
+                var eps = _monitor.KnownEndpoints();
+                if (eps.Count < 2) throw new SimulatorException("Servono almeno due endpoint configurati");
+                var body = Body(id);
+                var a = await Post(steps, $"POST {eps[0].Path}", node, rid, body, null, ct, path: eps[0].Path);
+                var b = await Post(steps, $"Stesso ID e stessi byte su {eps[1].Path}", node, rid, body, null, ct, path: eps[1].Path);
+                var applied = await _verifier.AppliedRowsForRequestAsync(rid, ct);
+                return (a.Status == 200 && b.Status == 422 && applied is null or 1, $"Risposte {a.Status} e {b.Status}; {AppliedText(applied)}");
+            }
+            case "unknown-path":
+            {
+                var path = "/api/v1/non-configurato-" + rid[..8];
+                var r = await Post(steps, $"POST {path}", node, rid, Body(id), null, ct, path: path);
+                var applied = await _verifier.AppliedRowsForRequestAsync(rid, ct);
+                return (r.Status == 404 && applied is null or 0, $"Risposta {r.Status}; {AppliedText(applied)}");
             }
             default: throw new SimulatorException($"Scenario '{id}' non implementato");
         }

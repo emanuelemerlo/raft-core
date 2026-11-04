@@ -14,6 +14,9 @@ public sealed class OpRecord
 {
     public long Seq { get; init; }
     public string RequestId { get; init; } = "";
+    /// <summary>Endpoint scelto alla prima risoluzione e mantenuto in tutti i ritenti (contratto client).</summary>
+    public string Endpoint { get; set; } = "";
+    public string EndpointPath { get; set; } = "";
     public DateTimeOffset StartedAt { get; init; }
     public DateTimeOffset? CompletedAt { get; set; }
     public OpOutcome Outcome { get; set; } = OpOutcome.InCorso;
@@ -32,6 +35,8 @@ public sealed class GeneratorSettings
     public string Target { get; set; } = "RoundRobin";
     /// <summary>Byte di riempimento aggiunti al JSON (campo "pad") per simulare payload più grandi.</summary>
     public int PadBytes { get; set; }
+    /// <summary>Nome dell'endpoint; vuoto = tutti gli endpoint del cluster a rotazione.</summary>
+    public string Endpoint { get; set; } = "";
 }
 
 /// <summary>
@@ -65,7 +70,7 @@ public sealed class LoadGenerator : BackgroundService
     public LoadGenerator(SimulatorOptions opt, DataClient client, ClusterMonitor monitor, EventLog events)
     {
         _opt = opt; _client = client; _monitor = monitor; _events = events;
-        Settings = new GeneratorSettings { IntervalMs = opt.DefaultIntervalMs, Target = opt.DefaultTarget };
+        Settings = new GeneratorSettings { IntervalMs = opt.DefaultIntervalMs, Target = opt.DefaultTarget, Endpoint = opt.DefaultEndpoint };
     }
 
     public IReadOnlyCollection<OpRecord> AllOps => (IReadOnlyCollection<OpRecord>)_ops.Values;
@@ -76,6 +81,7 @@ public sealed class LoadGenerator : BackgroundService
         s.IntervalMs = Math.Clamp(s.IntervalMs, 5, 60_000);
         s.PadBytes = Math.Clamp(s.PadBytes, 0, _opt.MaxBodyBytes);
         if (string.IsNullOrWhiteSpace(s.Target)) s.Target = "RoundRobin";
+        s.Endpoint = s.Endpoint?.Trim() ?? "";
         Settings = s;
     }
 
@@ -83,7 +89,7 @@ public sealed class LoadGenerator : BackgroundService
     {
         if (_running) return;
         _running = true;
-        _events.Info($"Invio ciclico avviato: ogni {Settings.IntervalMs} ms, destinazione {TargetLabel(Settings.Target)}");
+        _events.Info($"Invio ciclico avviato: ogni {Settings.IntervalMs} ms, destinazione {TargetLabel(Settings.Target)}, {EndpointLabel(Settings.Endpoint)}");
     }
 
     public void Stop()
@@ -155,14 +161,18 @@ public sealed class LoadGenerator : BackgroundService
             int lastNetErrPort = -1;
             for (int attempt = 0; ; attempt++)
             {
+                if (op.EndpointPath.Length == 0 && PickEndpoint(settings.Endpoint, seq) is { } ep) { op.Endpoint = ep.Name; op.EndpointPath = ep.Path; }
                 var node = Pick(settings.Target, seq, attempt, lastNetErrPort);
-                if (node == null)
+                if (node == null || op.EndpointPath.Length == 0)
                 {
-                    lock (op) op.Attempts.Add(new Attempt(0, 0, 0, "nessun nodo raggiungibile"));
+                    string why = node == null ? "nessun nodo raggiungibile"
+                        : settings.Endpoint.Length > 0 ? $"endpoint '{settings.Endpoint}' non esposto dal cluster" : "nessun endpoint noto";
+                    lock (op) op.Attempts.Add(new Attempt(node?.Port ?? 0, 0, 0, why));
+                    op.Error = why;
                 }
                 else
                 {
-                    var r = await _client.PostDataAsync(node.Url, op.RequestId, body, _opt.RequestTimeoutMs, ct: ct);
+                    var r = await _client.PostDataAsync(node.Url, op.EndpointPath, op.RequestId, body, _opt.RequestTimeoutMs, ct: ct);
                     lock (op) op.Attempts.Add(new Attempt(node.Port, r.Status, r.ElapsedMs, r.Error));
                     if (r.Status is >= 200 and < 500)
                     {
@@ -207,6 +217,15 @@ public sealed class LoadGenerator : BackgroundService
             w.WriteEndObject();
         }
         return ms.ToArray();
+    }
+
+    /// <summary>Endpoint dell'operazione: quello richiesto, oppure a rotazione su quelli esposti dal cluster.</summary>
+    private SimEndpoint? PickEndpoint(string name, long seq)
+    {
+        var eps = _monitor.KnownEndpoints();
+        if (eps.Count == 0) return null;
+        if (name.Length > 0) return eps.FirstOrDefault(e => e.Name.Equals(name, StringComparison.Ordinal));
+        return eps[(int)(seq % eps.Count)];
     }
 
     private NodeView? Pick(string target, long seq, int attempt, int avoidPort)
@@ -293,6 +312,7 @@ public sealed class LoadGenerator : BackgroundService
                 runId = RunId,
                 settings = Settings,
                 targetLabel = TargetLabel(Settings.Target),
+                endpointLabel = EndpointLabel(Settings.Endpoint),
                 counters = new
                 {
                     sent = Interlocked.Read(ref _seq),
@@ -306,13 +326,15 @@ public sealed class LoadGenerator : BackgroundService
                 failovers = _faultResults.ToList(),
                 recent = _recent.Take(60).Select(o => new
                 {
-                    o.Seq, id = o.RequestId[..8], requestId = o.RequestId, startedAt = o.StartedAt, o.LatencyMs,
+                    o.Seq, id = o.RequestId[..8], requestId = o.RequestId, endpoint = o.Endpoint, startedAt = o.StartedAt, o.LatencyMs,
                     outcome = o.Outcome.ToString(), o.FinalStatus, o.Replay, attempts = o.Attempts.Count, path = o.Path,
                     error = o.Error == null ? null : DataClient.Truncate(o.Error, 160)
                 }).ToList()
             };
         }
     }
+
+    private static string EndpointLabel(string endpoint) => endpoint.Length == 0 ? "tutti gli endpoint a rotazione" : "endpoint " + endpoint;
 
     private string TargetLabel(string target) => target switch
     {
@@ -324,9 +346,9 @@ public sealed class LoadGenerator : BackgroundService
 
     public string OpsCsv()
     {
-        var sb = new StringBuilder("seq;requestId;startedAt;completedAt;outcome;finalStatus;replay;latencyMs;attempts;path;error\n");
+        var sb = new StringBuilder("seq;requestId;endpoint;startedAt;completedAt;outcome;finalStatus;replay;latencyMs;attempts;path;error\n");
         foreach (var o in _ops.Values.OrderBy(o => o.Seq))
-            sb.Append($"{o.Seq};{o.RequestId};{o.StartedAt:O};{o.CompletedAt:O};{o.Outcome};{o.FinalStatus};{o.Replay};{o.LatencyMs};{o.Attempts.Count};{o.Path};{o.Error?.Replace(';', ',').Replace('\n', ' ')}\n");
+            sb.Append($"{o.Seq};{o.RequestId};{o.Endpoint};{o.StartedAt:O};{o.CompletedAt:O};{o.Outcome};{o.FinalStatus};{o.Replay};{o.LatencyMs};{o.Attempts.Count};{o.Path};{o.Error?.Replace(';', ',').Replace('\n', ' ')}\n");
         return sb.ToString();
     }
 }

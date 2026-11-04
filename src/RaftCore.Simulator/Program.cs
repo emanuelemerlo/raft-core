@@ -40,6 +40,7 @@ api.MapGet("/state", (ClusterMonitor m, LoadGenerator g, EventLog e, AppliedLogV
     now = DateTimeOffset.Now,
     nodes = m.Snapshot(),
     leaderId = m.Leader()?.NodeId,
+    endpoints = m.KnownEndpoints(),
     scanned = m.ScannedTargets,
     generator = g.State(),
     events = e.Recent(120),
@@ -55,7 +56,7 @@ api.MapPost("/generator/settings", (GeneratorSettings s, LoadGenerator g) => { g
 api.MapPost("/generator/one", async (LoadGenerator g) =>
 {
     var op = await g.SendOneAsync();
-    return Results.Ok(new { op.Seq, op.RequestId, outcome = op.Outcome.ToString(), op.FinalStatus, op.LatencyMs, path = op.Path });
+    return Results.Ok(new { op.Seq, op.RequestId, op.Endpoint, outcome = op.Outcome.ToString(), op.FinalStatus, op.LatencyMs, path = op.Path });
 });
 api.MapPost("/generator/burst", (int? count, LoadGenerator g) => Results.Ok(new { sent = g.Burst(count ?? 50) }));
 api.MapPost("/generator/reset", (LoadGenerator g) => { g.ResetStats(); return Results.Ok(); });

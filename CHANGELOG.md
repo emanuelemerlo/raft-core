@@ -52,6 +52,9 @@ Il workflow di release usa la sezione della versione come note di rilascio.
 - **WAL in formato 2** (tipo della voce): un WAL in formato 1 blocca l'avvio (codice 2).
 - **Schema del database versione 2**: colonna `PayloadType` in `AppliedEntries`, `Requests` e `Quarantine`; con tabelle di una versione precedente il Leader non applica e risulta Not Ready.
 - `appsettings.json` e configurazioni d'esempio con due endpoint, `misure` e `eventi`.
+- `applied.log` della state machine SharedFile con la colonna `PayloadType` (8 campi); un file della 0.2 viene rifiutato.
+- `SqlServerDataRepository` riceve i writer per nome di endpoint; `JsonPayloadWriter` riceve la tabella dell'endpoint.
+- Firma HMAC delle RPC e delle risposte estesa alla versione di protocollo (header `X-Cluster-Protocol`) e, nelle risposte, all'impronta degli endpoint (`X-Cluster-Endpoints`).
 
 ### Rimosso
 - `StateMachine:SqlServer:DataTable` e la tabella `raft.IngestedData`: sostituite da `Endpoints[].Table`.
