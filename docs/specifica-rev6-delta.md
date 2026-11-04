@@ -1,6 +1,6 @@
 # Specifica — proposta di revisione 6 (delta rispetto alla rev. 5)
 
-*19 ottobre 2026. Stato: proposta, allineata all'implementazione v0.2.0. Elenca solo i requisiti nuovi, modificati o rimossi; gli altri restano quelli della rev. 5.*
+*19 ottobre 2026, aggiornata il 4 novembre 2026 (endpoint multipli). Stato: proposta, allineata all'implementazione v0.3 (non ancora rilasciata). Elenca solo i requisiti nuovi, modificati o rimossi; gli altri restano quelli della rev. 5.*
 
 ## Motivazione
 
@@ -29,7 +29,9 @@ L'alta affidabilità complessiva dipende ora anche da quella del database (fuori
 | REQ-SEC-3 | HMAC della richiesta | HMAC della richiesta **incluso il destinatario** (`DestNodeId`). Il ricevente rifiuta con 421 se il destinatario non è sé stesso. Ogni **risposta** è firmata dal risponditore e legata al nonce della richiesta; una risposta non firmata o di un altro nodo viene scartata |
 | Threat model §5 | Un `RestUrl` stantio degrada solo la discovery | Corretto: senza verifica d'identità un URL che porta a un altro membro causerebbe un **doppio conteggio** di voti e conferme (rischio di safety con N ≥ 5). Con la firma delle risposte il rischio è eliminato |
 | REQ-DIS-4 | Registro alimentato da UDP | Fonti: RPC autenticata > UDP > gossip del Leader (`MemberUrls` negli `AppendEntries`) > configurazione. Un URL che porta al nodo sbagliato viene invalidato |
-| REQ-CFG-1 | — | Aggiunti vincoli per `Log:*`, `StateMachine:*`, `MaxBodyBytes ≤ 64 MiB`, `RestPorts`, `Discovery:*`, `DevCluster:*`, nomi SQL validi |
+| REQ-CFG-1 | — | Aggiunti vincoli per `Log:*`, `StateMachine:*`, `MaxBodyBytes ≤ 64 MiB`, `RestPorts`, `Discovery:*`, `DevCluster:*`, nomi SQL validi, `Endpoints` (REQ-EPT-1) |
+| §14, REQ-API-1 | Un solo endpoint `POST /api/v1/data` | **Uno o più** endpoint di ingestione, ciascuno con il proprio path e la propria destinazione nel database (REQ-EPT-1). `POST /api/v1/data` non esiste più se non è configurato. Un path non configurato risponde 404 |
+| REQ-IDM-8 | `PayloadHash` = SHA-256 dei byte grezzi del body | `PayloadHash` = SHA-256 di `nome dell'endpoint ‖ 0x00 ‖ byte grezzi del body`. Il body resta letto una sola volta e mai ri-serializzato. Lo stesso `RequestId` usato su due endpoint diversi ottiene 422, anche con body identico (REQ-EPT-3) |
 
 ## Requisiti nuovi
 
@@ -58,6 +60,38 @@ Il cluster NON DEVE fermarsi per una singola voce.
 
 **REQ-OPS-7 (thread pool).** All'avvio il nodo DEVE impostare un minimo di thread del pool adeguato, perché fsync e lock sincroni non introducano pause tali da far scadere il lease.
 
+## Endpoint multipli (v0.3)
+
+Il servizio espone N endpoint REST, ognuno dei quali riceve un JSON di forma diversa diretto a una diversa destinazione nel database. Il protocollo Raft non cambia: tutti gli endpoint alimentano **un solo log**, con un solo ordine totale e un solo cursore `LastApplied`.
+
+**REQ-EPT-1 (configurazione).** Gli endpoint DEVONO essere dichiarati in `RaftCluster:Endpoints`, almeno uno e al massimo 64. Ogni endpoint ha:
+- `Name`: identificatore stabile, registrato in ogni voce del log (`[a-z0-9][a-z0-9_-]{0,63}`, unico);
+- `Path`: path assoluto del `POST`, unico senza distinzione tra maiuscole e minuscole, senza parametri né `/` finale, fuori dai prefissi riservati `/internal`, `/health`, `/api/v1/cluster`, `/api/v1/metrics`;
+- `Table`: tabella `schema.tabella` del writer JSON di default, obbligatoria con `Provider=SqlServer` se per quel nome non è registrato un writer personalizzato.
+
+Una configurazione non valida impedisce l'avvio (codice 1). La configurazione degli endpoint DEVE essere identica su tutti i nodi.
+
+**REQ-EPT-2 (tipo nella voce).** Ogni voce `Data` DEVE contenere il nome dell'endpoint (`PayloadType`), scritto nel WAL e replicato con la voce. L'applicatore sceglie il writer da `PayloadType`, mai dal contesto HTTP, perché il nodo che applica può essere diverso da quello che ha ricevuto la richiesta. Il WAL passa al **formato 2**.
+
+**REQ-EPT-3 (idempotenza globale).** `RequestId` resta unico per cluster, indipendentemente dall'endpoint. Il tipo è incluso nell'hash (REQ-IDM-8): un `RequestId` già usato su un altro endpoint produce `Conflict` (422) e nessuna scrittura.
+
+**REQ-EPT-4 (apply per tipo).** L'apply DEVE eseguire, nella stessa transazione condizionale su `LastApplied`, il writer associato a `PayloadType`. Se l'applicatore non ha un writer per quel tipo (configurazione disallineata o endpoint rimosso con voci in sospeso), la voce DEVE ricevere l'esito `Rejected` (422) e `LastApplied` avanza: l'errore è deterministico e non va ritentato.
+
+**REQ-EPT-5 (inoltro).** Il Follower DEVE inoltrare la richiesta al Leader **sullo stesso path dell'endpoint**. La firma HMAC copre il path (REQ-PRX-3/6), quindi un inoltro non può essere dirottato su un altro endpoint.
+
+**REQ-EPT-6 (ordine condiviso).** Le voci di tutti gli endpoint sono applicate in un unico ordine. Conseguenze accettate:
+- il throughput di apply è condiviso;
+- una voce lenta o in errore di un endpoint ritarda le altre fino all'esito (al più `MaxApplyAttempts` tentativi per un errore non classificato; senza limite per un errore transitorio del database);
+- le scritture di endpoint diversi rispettano l'ordine di commit.
+
+Quando serve isolamento si avviano **cluster distinti**, ciascuno con un proprio `ClusterId` e i propri endpoint, anche sullo stesso database: le tabelle di servizio sono già partizionate per `ClusterId`.
+
+**REQ-VER-1 (versione di protocollo).** Ogni RPC tra nodi e ogni annuncio UDP DEVONO contenere `ProtocolVersion`. Un nodo DEVE rifiutare le RPC e ignorare gli annunci con una versione diversa dalla propria: un nodo di versione incompatibile non vota, non riceve voci e non conta nel quorum. Ogni RPC contiene anche `EndpointsHash`, l'impronta della configurazione degli endpoint; un valore diverso NON blocca le RPC, così da permettere un aggiornamento della configurazione un nodo alla volta, ma DEVE essere segnalato (log, metrica `endpointsHashMismatch`, campo `endpointsMismatch` dello stato).
+
+**REQ-VER-2 (dati di formato precedente).** Non è prevista migrazione dalla v0.2.
+- Un WAL in formato 1 DEVE bloccare l'avvio (codice 2) con un messaggio che indica di svuotare la `DataDir`.
+- Lo schema del database ha una versione (`SchemaVersion`). Se il database contiene tabelle di servizio di una versione diversa, il Leader NON DEVE applicare: segnala l'errore in `stateMachineError` e `/health/ready` risulta Not Ready.
+
 ## Matrice dei test: aggiunte
 
 | ID | Scenario | Esito atteso |
@@ -75,6 +109,15 @@ Il cluster NON DEVE fermarsi per una singola voce.
 | T55 | Nodo riavviato su un'altra porta (la sua è occupata) | Gli altri lo ritrovano; il nodo si riallinea e inoltra al Leader |
 | T56 | Un solo avvio in Development con `DevCluster:Instances=3` | Tre nodi attivi; uccidendo il padre i figli terminano |
 | T57 | RPC verso il Leader spento appese fino al timeout | Nuovo Leader in meno di 3 s, ripetuto in 3 failover consecutivi |
+| T58 | Scritture su due endpoint, anche tramite inoltro da un Follower | Ogni dato nella tabella del proprio endpoint; indici del log unici e contigui |
+| T59 | Stesso `RequestId` su due endpoint, body identico | 422 `Conflict` sul secondo; nessuna scrittura nella seconda tabella |
+| T60 | Path non configurato | 404, nessuna voce nel log |
+| T61 | Voce di un tipo che l'applicatore non conosce | `Rejected` (422) registrato; le voci successive vengono applicate |
+| T62 | Nodo con `ProtocolVersion` diversa | RPC rifiutate: il nodo non vota e non conta nel quorum |
+| T63 | Nodi con `Endpoints` diversi | Cluster operativo; `endpointsHashMismatch` > 0 e `endpointsMismatch` nello stato |
+| T64 | Avvio su un WAL in formato 1 | Avvio bloccato (codice 2) |
+| T65 | `Endpoints` non validi (vuoti, nome o path duplicato, path riservato, tabella mancante) | Avvio bloccato (codice 1) con l'elenco delle violazioni |
+| T66 | Database con schema di una versione diversa | Nessun apply; `stateMachineError` valorizzato, Leader Not Ready |
 
 ## Fuori ambito (invariato salvo dove indicato)
 

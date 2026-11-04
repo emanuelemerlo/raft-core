@@ -1,6 +1,6 @@
 # RaftCore — Wiki
 
-RaftCore riceve dati via REST e li scrive una sola volta su SQL Server, restando disponibile quando un'istanza si guasta.
+RaftCore riceve dati JSON su uno o più endpoint REST e li scrive una sola volta su SQL Server, restando disponibile quando un'istanza si guasta.
 
 **Iniziare**
 - [Avvio rapido](Avvio-rapido) — 3 istanze sulla stessa macchina, prima scrittura, prova di failover
@@ -8,11 +8,11 @@ RaftCore riceve dati via REST e li scrive una sola volta su SQL Server, restando
 
 **Installare**
 - [Windows Service](Deploy-Windows-Service) · [Linux systemd](Deploy-Linux-systemd) · [Docker](Docker)
-- [SQL Server](SQL-Server) — schema, writer personalizzato, quarantena
+- [SQL Server](SQL-Server) — schema, writer per endpoint, quarantena
 
 **Gestire**
 - [Configurazione](Configurazione) — tutti i parametri
-- [Operazioni](Operazioni) — monitoraggio, sostituzione di un nodo, capacità
+- [Operazioni](Operazioni) — monitoraggio, aggiornamenti, endpoint, sostituzione di un nodo, capacità
 - [Risoluzione dei problemi](Risoluzione-problemi)
 - [Creare una release](Rilasci)
 

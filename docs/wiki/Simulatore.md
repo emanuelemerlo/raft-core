@@ -40,6 +40,7 @@ cd src/RaftCore.Simulator && dotnet run --launch-profile Simulatore
 
 - ruolo, term, Leader noto;
 - `commitIndex` / `lastApplied`, indice del log e dello snapshot;
+- endpoint configurati sul nodo, con un avviso se differiscono tra i nodi;
 - stato di `/health/ready`;
 - PID del processo.
 
@@ -51,9 +52,10 @@ Il nodo 1 ha il badge **debug**.
 {"seq": 42, "timestamp": "2026-10-19T16:28:14.2157204+02:00", "source": "simulatore", "runId": "6f2bf38c-…"}
 ```
 
-`seq` è progressivo, `runId` identifica la sessione del simulatore. Si possono impostare:
+`seq` è progressivo, `runId` identifica la sessione del simulatore. Gli endpoint sono letti da `GET /api/v1/cluster/status` dei nodi (campo `endpoints`), quindi non vanno configurati nel simulatore. Si possono impostare:
 
 - **intervallo** in ms;
+- **endpoint**: tutti a rotazione oppure uno preciso;
 - **destinazione**: tutti a rotazione, solo il Leader, solo i Follower per provare l'inoltro, oppure un nodo preciso;
 - **riempimento**: un campo `pad` per simulare payload più grandi.
 
@@ -98,6 +100,8 @@ Ogni scenario si esegue con un clic (o *Esegui tutti*) e riporta l'esito atteso,
 | Body oltre `MaxBodyBytes` | 413, nessuna scrittura (T34) |
 | `X-Forward-Hops` e `X-Forwarded-By` inviati dal client | 200: header non firmati ignorati |
 | Body senza `Content-Type` | 200 |
+| Stesso ID su due endpoint diversi | 200, poi 422; una sola scrittura (T59) |
+| Path non configurato | 404 (T60) |
 
 ## Verifica delle scritture
 
@@ -106,13 +110,15 @@ Ogni scenario si esegue con un clic (o *Esegui tutti*) e riporta l'esito atteso,
 - **violazioni**:
   - un `seq` o un `RequestId` applicato più volte;
   - un'operazione confermata con 200 ma assente;
+  - un'operazione applicata con un endpoint diverso da quello a cui è stata inviata;
 - **ammesso** (REQ-API-3): operazioni abbandonate dal client ma scritte comunque;
-- totali per esito (applicate, deduplicate, rifiutate, scadute, in quarantena, no-op) e continuità degli indici del log.
+- totali per esito (applicate, deduplicate, rifiutate, scadute, in quarantena, no-op), voci applicate per endpoint e continuità degli indici del log.
 
-Con la state machine SQL Server la verifica va fatta sul database, ad esempio:
+Con la state machine SQL Server la verifica va fatta sul database, ad esempio per ogni tabella di endpoint e tra endpoint diversi:
 
 ```sql
-SELECT RequestId, COUNT(*) FROM raft.IngestedData GROUP BY RequestId HAVING COUNT(*) > 1
+SELECT RequestId, COUNT(*) FROM dbo.Misure GROUP BY RequestId HAVING COUNT(*) > 1;
+SELECT RequestId FROM dbo.Misure INTERSECT SELECT RequestId FROM dbo.Eventi;   -- deve essere vuoto
 ```
 
 ## Configurazione
@@ -125,6 +131,7 @@ SELECT RequestId, COUNT(*) FROM raft.IngestedData GROUP BY RequestId HAVING COUN
 | `Ports` | `5001-5010` | Stesso formato di `RestPorts` |
 | `StatusPollMs` / `StatusTimeoutMs` | 1000 / 500 | Sondaggio di `/api/v1/cluster/status` e `/health/ready` |
 | `DefaultIntervalMs` / `DefaultTarget` | 200 / `RoundRobin` | Valori iniziali dell'invio ciclico |
+| `DefaultEndpoint` | — | Endpoint iniziale (`Name`); vuoto: tutti a rotazione |
 | `MaxInFlight` | 64 | Oltre, i tick dell'invio ciclico vengono saltati e contati |
 | `RequestTimeoutMs` | 15000 | Timeout per tentativo (REQ-CLI-2) |
 | `RetryBudgetMs` | 60000 | Tempo massimo dei ritenti di un'operazione |

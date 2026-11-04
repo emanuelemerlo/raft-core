@@ -32,7 +32,7 @@ Il profilo multiplo **Cluster + Simulatore** avvia insieme il cluster e il [simu
 Prova rapida (PowerShell):
 
 ```powershell
-Invoke-RestMethod -Method Post http://localhost:5002/api/v1/data -Headers @{"X-Request-ID"=[guid]::NewGuid()} -ContentType application/json -Body '{"a":1}'
+Invoke-RestMethod -Method Post http://localhost:5002/api/v1/misure -Headers @{"X-Request-ID"=[guid]::NewGuid()} -ContentType application/json -Body '{"a":1}'
 Invoke-RestMethod http://localhost:5001/api/v1/cluster/status
 ```
 
@@ -77,11 +77,13 @@ Dopo il primo avvio riuscito, i riavvii successivi vanno fatti **senza** `AllowE
 ## 3. Scrivere un dato
 
 ```bash
-curl -i -X POST http://localhost:5002/api/v1/data \
+curl -i -X POST http://localhost:5002/api/v1/misure \
   -H "X-Request-ID: 6f1c2b2e-4b7a-4d55-9d0a-1e2f3a4b5c6d" -H "Content-Type: application/json" -d '{"temperatura":21.5}'
 ```
 
-La risposta è `200` anche se il nodo 2 non è il Leader. Ripetendo la stessa richiesta si ottiene `200` con `X-Idempotent-Replay: true`, e il dato non viene scritto una seconda volta.
+La risposta è `200` anche se il nodo 2 non è il Leader. Ripetendo la stessa richiesta si ottiene `200` con `X-Idempotent-Replay: true`, e il dato non viene scritto una seconda volta. Inviando lo stesso ID a `/api/v1/eventi` si ottiene `422`: l'ID identifica l'operazione in tutto il cluster.
+
+Gli endpoint `misure` e `eventi` sono quelli d'esempio di `appsettings.json` (sezione `Endpoints`).
 
 ## 4. Osservare il cluster
 
@@ -95,4 +97,4 @@ curl http://localhost:5001/health/ready
 
 Si termina brutalmente il processo del Leader (Linux: `kill -9 <pid>`; Windows: `Stop-Process -Force`), poi si ripete la scrittura su un altro nodo: entro circa 2-3 secondi un nuovo Leader risponde. Riavviando il nodo terminato (senza `AllowEmptyState`), questo si riallinea da solo.
 
-I dati scritti si trovano in `shared-state/applied.log` (sviluppo) oppure nelle tabelle SQL Server (vedi [SQL Server](SQL-Server)).
+I dati scritti si trovano in `shared-state/applied.log` (sviluppo; ogni riga riporta l'endpoint) oppure nelle tabelle degli endpoint su SQL Server (vedi [SQL Server](SQL-Server)).

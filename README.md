@@ -2,22 +2,24 @@
 
 [![CI](https://github.com/emanuelemerlo/raft-core/actions/workflows/ci.yml/badge.svg)](https://github.com/emanuelemerlo/raft-core/actions/workflows/ci.yml)
 
-Servizio .NET 8 ad alta affidabilità che riceve dati tramite API REST e li scrive **una sola volta** su un database **SQL Server condiviso**, anche quando un'istanza si guasta. Le istanze (3 o 5 in produzione) si coordinano con un sottoinsieme rigoroso di **Raft**: elezione del Leader, replica durevole del log, compattazione.
+Servizio .NET 8 ad alta affidabilità che riceve dati JSON su uno o più endpoint REST e li scrive **una sola volta** su un database **SQL Server condiviso**, anche quando un'istanza si guasta. Ogni endpoint ha il proprio path e la propria tabella. Le istanze (3 o 5 in produzione) si coordinano con un sottoinsieme rigoroso di **Raft**: elezione del Leader, replica durevole del log, compattazione.
 
 - **Nessun componente esterno** di coordinamento: niente Consul, Redis o ZooKeeper.
 - **Il client può chiamare qualunque istanza**: i Follower inoltrano al Leader in modo trasparente.
-- **Effectively-once**: lo stesso `X-Request-ID` non viene mai scritto due volte, anche dopo un failover o un retry.
+- **Endpoint configurabili**: N endpoint (`/api/v1/misure`, `/api/v1/eventi`, …) che ricevono JSON diversi, con un writer per endpoint. Tutti condividono lo stesso log e lo stesso ordine di scrittura.
+- **Effectively-once**: lo stesso `X-Request-ID` non viene mai scritto due volte, su nessun endpoint, anche dopo un failover o un retry.
 - **Il failover non perde nulla**: una risposta `200` implica la scrittura durevole su un quorum e sul database.
 - Funziona su **Windows** (anche come servizio), **Linux** (systemd), **macOS** e in **Docker**.
 
 ## Come funziona, in breve
 
 ```text
-client ──POST /api/v1/data──▶ qualunque nodo ──inoltro firmato──▶ Leader
+client ──POST /api/v1/misure──▶ qualunque nodo ──inoltro firmato──▶ Leader
                                                                    │ 1. append al WAL (fsync, group commit)
                                                                    │ 2. replica su un quorum
                                                                    │ 3. apply su SQL Server in UNA transazione:
-                                                                   │    dati + esito + LastApplied = LogIndex
+                                                                   │    dati (writer dell'endpoint) + esito
+                                                                   │    + LastApplied = LogIndex
                                                                    ▼
 client ◀────────────── 200 (o esito già registrato) ─────────── SQL Server condiviso
 ```
@@ -45,9 +47,11 @@ for i in 1 2 3; do
     --RaftCluster:RestPort=500$i --RaftCluster:UdpMode=Multicast --RaftCluster:Storage:AllowEmptyState=true &
 done
 
-curl -X POST http://localhost:5002/api/v1/data -H "X-Request-ID: $(uuidgen)" -H "Content-Type: application/json" -d '{"temperatura": 21.5}'
+curl -X POST http://localhost:5002/api/v1/misure -H "X-Request-ID: $(uuidgen)" -H "Content-Type: application/json" -d '{"temperatura": 21.5}'
 curl http://localhost:5001/api/v1/cluster/status
 ```
+
+`appsettings.json` contiene due endpoint d'esempio, `misure` (`/api/v1/misure`) e `eventi` (`/api/v1/eventi`): si configurano in [Configurazione](docs/wiki/Configurazione.md) → `Endpoints`.
 
 Senza SQL Server il servizio usa la state machine **SharedFile** (`./shared-state/applied.log`), pensata solo per sviluppo e test sulla stessa macchina. Con Docker si avvia un cluster completo con SQL Server:
 
@@ -63,13 +67,13 @@ docker compose -f deploy/docker/docker-compose.yml up --build
 | Invio dati, scenari e guasti dall'interfaccia web | [Simulatore client](docs/wiki/Simulatore.md) |
 | Tutti i parametri | [Configurazione](docs/wiki/Configurazione.md) |
 | Come funziona dentro | [Architettura](docs/wiki/Architettura.md) |
-| Database, writer personalizzato, quarantena | [SQL Server](docs/wiki/SQL-Server.md) |
+| Database, writer per endpoint, quarantena | [SQL Server](docs/wiki/SQL-Server.md) |
 | Retry, codici di risposta, idempotenza | [Contratto client](docs/wiki/Contratto-client.md) |
 | Installazione | [Windows Service](docs/wiki/Deploy-Windows-Service.md) · [Linux systemd](docs/wiki/Deploy-Linux-systemd.md) · [Docker](docs/wiki/Docker.md) |
-| Monitoraggio, sostituzione di un nodo, capacità | [Operazioni](docs/wiki/Operazioni.md) |
+| Monitoraggio, aggiornamenti, aggiunta di endpoint, sostituzione di un nodo | [Operazioni](docs/wiki/Operazioni.md) |
 | Problemi comuni | [Risoluzione dei problemi](docs/wiki/Risoluzione-problemi.md) |
 | Rilasci | [Creare una release](docs/wiki/Rilasci.md) · [CHANGELOG](CHANGELOG.md) |
-| Specifica | [Modifiche proposte per la rev. 6](docs/specifica-rev6-delta.md) |
+| Specifica | [Modifiche proposte per la rev. 6](docs/specifica-rev6-delta.md), endpoint multipli inclusi |
 
 ## Struttura del repository
 

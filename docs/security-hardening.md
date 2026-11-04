@@ -70,7 +70,7 @@ Gli endpoint `/health/*` non sono toccati.
 ## Cosa NON è incluso (follow-up più onerosi, da pianificare)
 
 - **mTLS tra i nodi** e relativa PKI (cifratura del piano dati/controllo; oggi HMAC dà integrità, non riservatezza).
-- **Autenticazione di `/api/v1/data`** (oggi chiunque raggiunga la porta può scrivere).
+- **Autenticazione degli endpoint di ingestione** (oggi chiunque raggiunga la porta può scrivere).
 - **Firma degli artefatti di release** (cosign/Sigstore) e attestazione di provenienza (SLSA).
 - **Pin per digest** delle immagini base nel `Dockerfile` (Dependabot `docker` è già configurato per gestirlo).
 - **CodeQL** come analisi statica in CI.

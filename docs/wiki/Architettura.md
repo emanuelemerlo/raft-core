@@ -6,26 +6,43 @@
 | --- | --- |
 | `RaftNode` | Elezione (PreVote, voto), replica, commit, lease, group commit, apply sul database, compattazione |
 | `WalLog` | Log su disco a segmenti, append-only, CRC32C, troncamento logico, snapshot |
-| `ClientApi` | API pubblica: validazione, inoltro al Leader (Smart Proxy), deadline unico |
+| `ClientApi` | Endpoint di ingestione configurati (`Endpoints`): validazione, inoltro al Leader (Smart Proxy), deadline unico |
 | `SecurityMiddleware` + `RpcVerifier` | Autenticazione HMAC delle RPC e degli inoltri, firma delle risposte |
 | `PeerRegistry` + `UdpDiscoveryService` | Indirizzi dei nodi (UDP, configurazione, RPC, gossip del Leader). Non influiscono mai sul quorum |
-| `IDataRepository` | State machine su database condiviso: `SqlServerDataRepository`, `SharedFileDataRepository` |
+| `IDataRepository` | State machine su database condiviso: `SqlServerDataRepository` (un `ISqlPayloadWriter` per endpoint), `SharedFileDataRepository` |
 
 ## Percorso di una scrittura
 
-1. Il client invia `POST /api/v1/data` a un nodo qualsiasi. Il body viene letto una volta, validato e ne viene calcolato lo SHA-256.
-2. Se il nodo non è Leader, inoltra la richiesta con firma HMAC, numero di hop e tempo residuo del deadline.
-3. Il Leader verifica l'idempotenza nella finestra di log. Se l'ID è già in corso, la richiesta attende la stessa voce. Altrimenti la accoda al **group commit**, che scrive più richieste con un solo fsync fuori dal lock globale.
+1. Il client invia `POST` al path di un endpoint, su un nodo qualsiasi. Il body viene letto una volta e validato; l'hash SHA-256 copre il nome dell'endpoint e il body.
+2. Se il nodo non è Leader, inoltra la richiesta **sullo stesso path** con firma HMAC (che copre il path), numero di hop e tempo residuo del deadline.
+3. Il Leader verifica l'idempotenza nella finestra di log. Se l'ID è già in corso, la richiesta attende la stessa voce. Altrimenti la accoda al **group commit**, che scrive più richieste con un solo fsync fuori dal lock globale. La voce contiene il nome dell'endpoint (`PayloadType`).
 4. La voce viene replicata. È *committed* quando è durevole su un quorum e appartiene al term corrente.
-5. Il Leader la **applica al database** in una transazione che: verifica `LastApplied = LogIndex - 1`; decide l'esito (scritta, duplicata, in conflitto, scaduta, rifiutata); registra l'esito; avanza `LastApplied`.
+5. Il Leader la **applica al database** in una transazione che: verifica `LastApplied = LogIndex - 1`; decide l'esito (scritta, duplicata, in conflitto, scaduta, rifiutata); per una scrittura usa il writer dell'endpoint indicato nella voce; registra l'esito; avanza `LastApplied`.
 6. La risposta HTTP è l'esito registrato. Ogni replay, anche dopo un failover, restituisce lo stesso status e lo stesso body.
 
 ## Garanzie
 
 - **Safety di Raft**: al più un Leader per term; le voci committed non vengono mai perse né sovrascritte.
 - **Una sola scrittura per voce**: la condizione su `LastApplied` rende sicuri anche due applicatori concorrenti (ex Leader e nuovo Leader).
-- **Una sola scrittura per RequestId**: indice permanente `raft.Requests`, indipendente dalla compattazione del log.
+- **Una sola scrittura per RequestId**: indice permanente `raft.Requests`, indipendente dalla compattazione del log e comune a tutti gli endpoint.
 - **Determinismo**: ogni decisione (scadenza, rifiuto, quarantena) viene presa una volta sola e registrata nella stessa transazione. Non dipende quindi dall'orologio dei singoli nodi.
+
+## Endpoint multipli
+
+Gli endpoint configurati (`Endpoints`) sono porte d'ingresso diverse dello **stesso** log: Raft, WAL, replica e cursore `LastApplied` non distinguono i tipi di dato. Il tipo viaggia nella voce (`PayloadType`), perché il nodo che applica può non essere quello che ha ricevuto la richiesta, ad esempio dopo un failover.
+
+Conseguenze di un log unico:
+- **Ordine totale**: le scritture di tutti gli endpoint sono applicate nell'ordine di commit. Se un tipo di dato dipende da un altro (es. un ordine che riferisce un cliente), l'ordine è rispettato.
+- **Throughput condiviso**: l'apply è sequenziale per tutto il cluster.
+- **Blocco in testa alla coda**: una voce lenta o in errore ritarda tutte le successive, di qualunque endpoint, finché non riceve un esito. Un errore transitorio del database ferma tutto finché il database non torna disponibile; un errore non classificato al più per `MaxApplyAttempts` tentativi, poi la voce va in quarantena.
+
+Quando un gruppo di endpoint deve essere isolato dagli altri (tabelle lente, carichi molto diversi), si avviano **cluster distinti** con `ClusterId` diversi, anche sullo stesso database: `ApplyState`, `Requests` e `AppliedEntries` sono partizionate per `ClusterId`.
+
+## Versioni e compatibilità
+
+- Ogni RPC e ogni annuncio UDP contengono la **versione di protocollo**. Un nodo di un'altra versione viene rifiutato: non vota, non riceve voci e non conta nel quorum. Un aggiornamento che cambia la versione di protocollo richiede quindi il riavvio di tutti i nodi (vedi [Operazioni](Operazioni)).
+- Ogni RPC contiene anche l'**impronta della configurazione degli endpoint**. Una differenza non blocca il cluster, per permettere di aggiornare la configurazione un nodo alla volta, ma viene segnalata.
+- Il WAL ha un formato versionato (attuale: 2) e lo schema del database una versione (attuale: 2). Non è prevista migrazione da formati precedenti: un WAL di formato diverso blocca l'avvio del nodo, uno schema di versione diversa blocca l'apply.
 
 ## Elezione
 
@@ -59,6 +76,6 @@ Poiché lo stato applicativo vive nel database condiviso, lo snapshot non contie
 .lock              lock esclusivo del processo
 raft_state.json    term, voto, membri (scrittura atomica e durevole)
 commit.idx         commitIndex (limite inferiore, non sincronizzato)
-wal/00000001.wal   segmenti del log
+wal/00000001.wal   segmenti del log (formato 2)
 wal/snapshot.json  punto di compattazione
 ```

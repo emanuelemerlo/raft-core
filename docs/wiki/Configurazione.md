@@ -21,6 +21,27 @@ All'avvio tutti i vincoli vengono verificati: se uno è violato il nodo **non pa
 | `Members` | — | Esattamente `ClusterSize` GUID distinti, identici su tutti i nodi |
 | `BaseDirectory` | — | Base dei percorsi relativi. Vuoto: directory corrente; directory dell'eseguibile se in esecuzione come servizio |
 
+## Endpoint di ingestione (`Endpoints`)
+
+Il servizio espone uno o più endpoint `POST`, ciascuno per un tipo di dato con la propria tabella. Tutti condividono lo stesso log Raft, la stessa idempotenza e lo stesso contratto client (vedi [Architettura](Architettura) → endpoint multipli).
+
+```json
+"Endpoints": [
+  { "Name": "misure", "Path": "/api/v1/misure", "Table": "dbo.Misure" },
+  { "Name": "eventi", "Path": "/api/v1/eventi", "Table": "dbo.Eventi" }
+]
+```
+
+| Campo | Note |
+| --- | --- |
+| `Name` | Identificatore registrato in ogni voce del log: minuscole, cifre, `-` e `_`, massimo 64 caratteri, unico. **Non va rinominato** finché ci sono voci in sospeso: per il servizio un nome nuovo è un altro tipo |
+| `Path` | Path del `POST`, ad esempio `/api/v1/misure`. Unico (senza distinzione tra maiuscole e minuscole), senza parametri né `/` finale. Non può iniziare con `/internal`, `/health`, `/api/v1/cluster` o `/api/v1/metrics` |
+| `Table` | Tabella `schema.tabella` del writer JSON di default (solo `Provider=SqlServer`). Facoltativa se per quel `Name` è registrato un writer personalizzato (vedi [SQL Server](SQL-Server)) |
+
+Vincoli: almeno un endpoint, al massimo 64. La configurazione deve essere **identica su tutti i nodi**: se differisce, il cluster continua a funzionare ma lo segnala (metrica `endpointsHashMismatch`). Per aggiungere o rimuovere un endpoint vedere [Operazioni](Operazioni).
+
+Da variabili d'ambiente gli elementi si indicano con l'indice: `RaftCluster__Endpoints__0__Name=misure`, `RaftCluster__Endpoints__0__Path=/api/v1/misure`, e così via.
+
 ## Rete
 
 | Parametro | Default | Note |
@@ -106,15 +127,14 @@ La RAM usata dal log è proporzionale a `RetainEntries` più le voci non ancora 
 | `SharedFile:Directory` | `./shared-state` | Directory condivisa tra le istanze |
 | `SqlServer:ConnectionString` | — | Preferibilmente via `RAFT_SQL_CONNECTION` |
 | `SqlServer:Schema` | `raft` | Schema delle tabelle di servizio |
-| `SqlServer:DataTable` | `raft.IngestedData` | Tabella del writer di default |
 | `SqlServer:CommandTimeoutSeconds` | 30 | |
-| `SqlServer:AutoCreateSchema` | true | Crea le tabelle mancanti al primo apply; in produzione si può disattivare ed eseguire `sql/001_init.sql` |
+| `SqlServer:AutoCreateSchema` | true | Crea le tabelle di servizio e quelle degli endpoint (`Table`) mancanti al primo apply; in produzione si può disattivare ed eseguire gli script (vedi [SQL Server](SQL-Server)) |
 
 ## Codici di uscita
 
 | Codice | Significato |
 | --- | --- |
 | 1 | Configurazione non valida |
-| 2 | Avvio bloccato (stato assente senza `AllowEmptyState`, DataDir di un altro NodeId) |
+| 2 | Avvio bloccato (stato assente senza `AllowEmptyState`, DataDir di un altro NodeId, WAL di una versione precedente) |
 | 3 | DataDir già in uso da un altro processo |
 | 4 | Nessuna porta libera in `RestPorts` |
