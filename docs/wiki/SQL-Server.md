@@ -4,33 +4,45 @@ Tutti i nodi scrivono sullo **stesso** database. Il servizio garantisce che ogni
 
 ## 1. Preparare il database
 
-Lo schema viene creato automaticamente al primo apply (`AutoCreateSchema=true`). In produzione si può invece eseguire lo script e disattivare l'opzione:
+Le tabelle vengono create automaticamente al primo apply (`AutoCreateSchema=true`): quelle di servizio nello schema `Schema` e quella di ogni endpoint (`Endpoints[].Table`). In produzione si possono invece eseguire gli script e disattivare l'opzione:
 
 ```bash
 sqlcmd -S sql01 -d Ingest -i sql/001_init.sql
+# una volta per ogni endpoint con il writer JSON di default
+sqlcmd -S sql01 -d Ingest -i sql/002_endpoint_table.sql -v Schema=dbo Table=Misure
+sqlcmd -S sql01 -d Ingest -i sql/002_endpoint_table.sql -v Schema=dbo Table=Eventi
 ```
 
 | Tabella | Contenuto |
 | --- | --- |
+| `raft.SchemaVersion` | Versione dello schema delle tabelle di servizio (attuale: 2) |
 | `raft.ApplyState` | Una riga per cluster: `LastApplied`, l'indice dell'ultima voce scritta |
-| `raft.AppliedEntries` | Esito di ogni voce (status HTTP e body della risposta): fonte dei replay |
-| `raft.Requests` | Prima occorrenza di ogni `RequestId`: idempotenza permanente |
-| `raft.Quarantine` | Voci in quarantena, con payload e motivo |
-| `raft.IngestedData` | Dati del writer di default (JSON grezzo) |
+| `raft.AppliedEntries` | Esito di ogni voce, con l'endpoint (`PayloadType`), lo status HTTP e il body della risposta: fonte dei replay |
+| `raft.Requests` | Prima occorrenza di ogni `RequestId`, con l'endpoint: idempotenza permanente |
+| `raft.Quarantine` | Voci in quarantena, con endpoint, payload e motivo |
+| `Endpoints[].Table` | Una tabella per endpoint: dati del writer di default (JSON grezzo) |
 
-Permessi minimi dell'utente del servizio: `SELECT, INSERT, UPDATE` sullo schema `raft` e sulle tabelle applicative; `CREATE TABLE`/`CREATE SCHEMA` solo se `AutoCreateSchema=true`.
+Ogni tabella di endpoint ha le colonne `Id`, `ClusterId`, `RequestId`, `LogIndex`, `ReceivedUtc` e `Payload` (JSON, `ISJSON = 1`), con `RequestId` unico per cluster.
+
+Permessi minimi dell'utente del servizio: `SELECT, INSERT, UPDATE` sullo schema `raft` e sulle tabelle degli endpoint; `CREATE TABLE`/`CREATE SCHEMA` solo se `AutoCreateSchema=true`.
+
+**Versione dello schema.** Il servizio non migra database di versioni precedenti. Se trova tabelle di servizio senza `SchemaVersion` o con una versione diversa, il Leader non applica nulla: `GET /api/v1/cluster/status` riporta l'errore in `stateMachineError` e `/health/ready` risponde 503. Si usa un database (o uno `Schema`) nuovo, oppure si eliminano le tabelle di servizio dopo averne salvato i dati.
 
 ## 2. Configurare i nodi
 
 ```json
-"StateMachine": { "Provider": "SqlServer", "SqlServer": { "Schema": "raft", "DataTable": "raft.IngestedData" } }
+"StateMachine": { "Provider": "SqlServer", "SqlServer": { "Schema": "raft" } },
+"Endpoints": [
+  { "Name": "misure", "Path": "/api/v1/misure", "Table": "dbo.Misure" },
+  { "Name": "eventi", "Path": "/api/v1/eventi", "Table": "dbo.Eventi" }
+]
 ```
 
 La stringa di connessione si passa tramite variabile d'ambiente: `RAFT_SQL_CONNECTION="Server=sql01;Database=Ingest;Integrated Security=True;TrustServerCertificate=True"`.
 
 ## 3. Scrivere nelle proprie tabelle
 
-Il writer di default salva il JSON grezzo. Per scrivere nelle proprie tabelle si implementa `ISqlPayloadWriter`, che riceve connessione e transazione: **non** si apre una transazione propria e non si fa commit.
+Il writer di default salva il JSON grezzo nella `Table` dell'endpoint. Per scrivere nelle proprie tabelle si implementa `ISqlPayloadWriter` e lo si registra **con il `Name` dell'endpoint**. Il writer riceve connessione e transazione: **non** si apre una transazione propria e non si fa commit.
 
 ```csharp
 public sealed class MisureWriter : ISqlPayloadWriter
@@ -54,12 +66,15 @@ public sealed class MisureWriter : ISqlPayloadWriter
 Registrazione in `Program.cs`:
 
 ```csharp
-await using var node = await NodeHost.StartAsync(args, (services, cfg) => services.AddSingleton<ISqlPayloadWriter, MisureWriter>());
+await using var node = await NodeHost.StartAsync(args, (services, cfg) => services.AddPayloadWriter<MisureWriter>("misure"));
 ```
+
+Gli endpoint senza un writer registrato usano il writer JSON di default, che richiede `Table`. Un endpoint senza writer e senza `Table` impedisce l'avvio (codice 1).
 
 Regole:
 - La scrittura deve essere **deterministica**: dipendere solo dal contenuto della voce, mai dall'ora corrente (usare `e.ReceivedUtc`).
 - **Niente effetti esterni** (email, chiamate HTTP): se la transazione viene annullata non si possono annullare.
+- Il writer riceve solo le voci del proprio endpoint (`e.PayloadType`); un writer può essere registrato per più nomi.
 
 ## 4. Errori e poison entry
 
@@ -67,12 +82,13 @@ Regole:
 | --- | --- | --- |
 | Business permanente | `PayloadRejectedException`, JSON non valido, violazione di vincolo (547, 2627), troncamento (2628, 8152), conversione (245, 8114), `THROW 50001…` | Esito **Rejected** (422) registrato; il cluster prosegue |
 | Transitorio | Timeout, deadlock (1205), connessione persa, failover (40613, 4060…) | Ritentato **senza limite** con backoff fino a `ApplyRetryMaxDelayMs`. Le richieste attendono; `/health/ready` del Leader risulta Not Ready |
+| Endpoint sconosciuto all'applicatore | Voce di un `PayloadType` senza writer su questo nodo (configurazione disallineata, endpoint rimosso con voci in sospeso) | Esito **Rejected** (422) registrato; metrica `applyUnknownType`; il cluster prosegue |
 | Altro (bug, dato imprevisto) | `NullReferenceException`, `InvalidCastException` | Ritentato `MaxApplyAttempts` volte, poi **quarantena** (422 `quarantined`); il cluster prosegue |
 
-Per riprocessare una voce in quarantena dopo aver corretto il problema: leggere il payload da `raft.Quarantine` e reinviarlo al servizio con un **nuovo** `X-Request-ID`.
+Per riprocessare una voce in quarantena dopo aver corretto il problema: leggere il payload da `raft.Quarantine` e reinviarlo all'endpoint indicato da `PayloadType` con un **nuovo** `X-Request-ID`.
 
 ```sql
-SELECT LogIndex, RequestId, Reason, CreatedUtc, CAST(Payload AS NVARCHAR(MAX)) AS PayloadJson
+SELECT LogIndex, RequestId, PayloadType, Reason, CreatedUtc, CAST(Payload AS NVARCHAR(MAX)) AS PayloadJson
 FROM raft.Quarantine ORDER BY LogIndex DESC;
 ```
 

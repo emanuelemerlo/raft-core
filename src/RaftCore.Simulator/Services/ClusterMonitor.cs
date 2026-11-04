@@ -2,6 +2,9 @@ using System.Text.Json;
 
 namespace RaftCore.Simulator.Services;
 
+/// <summary>Endpoint di ingestione esposto da un nodo (campo endpoints di /api/v1/cluster/status).</summary>
+public sealed record SimEndpoint(string Name, string Path);
+
 public sealed class NodeView
 {
     public string NodeId { get; init; } = "";
@@ -22,6 +25,9 @@ public sealed class NodeView
     public string? UnhealthyReason { get; set; }
     public bool Ready { get; set; }
     public string? ReadyReason { get; set; }
+    public IReadOnlyList<SimEndpoint> Endpoints { get; set; } = Array.Empty<SimEndpoint>();
+    /// <summary>Il nodo segnala membri con una configurazione Endpoints diversa (endpointsMismatch non vuoto).</summary>
+    public bool EndpointsMismatch { get; set; }
     public int? Pid { get; set; }
     public bool IsDevParent { get; set; }
     public bool Paused { get; set; }
@@ -81,6 +87,14 @@ public sealed class ClusterMonitor : BackgroundService
 
     public IReadOnlyList<NodeView> Reachable() => Snapshot().Where(n => n.Reachable).OrderBy(n => n.Port).ToList();
 
+    /// <summary>Endpoint di ingestione del cluster: quelli del Leader, altrimenti quelli del primo nodo raggiungibile.</summary>
+    public IReadOnlyList<SimEndpoint> KnownEndpoints()
+    {
+        var nodes = Reachable();
+        return (nodes.FirstOrDefault(n => n.Role == "Leader" && n.Endpoints.Count > 0) ?? nodes.FirstOrDefault(n => n.Endpoints.Count > 0))?.Endpoints
+               ?? Array.Empty<SimEndpoint>();
+    }
+
     public NodeView? Leader()
     {
         lock (_l)
@@ -127,6 +141,8 @@ public sealed class ClusterMonitor : BackgroundService
                 n.LastLogIndex = s.LastLogIndex; n.SnapshotIndex = s.SnapshotIndex; n.Healthy = s.Healthy;
                 n.StateMachineHealthy = s.StateMachineHealthy; n.StateMachineError = s.StateMachineError; n.UnhealthyReason = s.UnhealthyReason;
                 n.Ready = s.Ready; n.ReadyReason = s.ReadyReason; n.KilledBySimulator = false;
+                if (s.EndpointsMismatch && !n.EndpointsMismatch) _events.Warn($"Nodo {n.ShortId}: configurazione Endpoints diversa tra i nodi");
+                n.Endpoints = s.Endpoints; n.EndpointsMismatch = s.EndpointsMismatch;
                 if (n.Pid == null || !IsAlive(n.Pid)) newPids.Add(n);
             }
             foreach (var n in _nodes.Values.Where(n => n.Reachable && !seen.Contains(n.NodeId)))
@@ -170,7 +186,7 @@ public sealed class ClusterMonitor : BackgroundService
 
     private sealed record Probe(string NodeId, string Url, int Port, string Role, long Term, string? LeaderId, long CommitIndex, long LastApplied,
         long LastLogIndex, long SnapshotIndex, bool Healthy, bool StateMachineHealthy, string? StateMachineError, string? UnhealthyReason,
-        bool Ready, string? ReadyReason);
+        bool Ready, string? ReadyReason, IReadOnlyList<SimEndpoint> Endpoints, bool EndpointsMismatch);
 
     private async Task<Probe?> ProbeAsync(string baseUrl, CancellationToken ct)
     {
@@ -198,9 +214,16 @@ public sealed class ClusterMonitor : BackgroundService
             }
             catch (Exception) when (!ct.IsCancellationRequested) { }
 
+            var endpoints = new List<SimEndpoint>();
+            if (r.TryGetProperty("endpoints", out var eps) && eps.ValueKind == JsonValueKind.Array)
+                foreach (var e in eps.EnumerateArray())
+                    if (e.TryGetProperty("name", out var en) && e.TryGetProperty("path", out var ep) && en.GetString() is { } name && ep.GetString() is { } path)
+                        endpoints.Add(new SimEndpoint(name, path));
+            bool mismatch = r.TryGetProperty("endpointsMismatch", out var mm) && mm.ValueKind == JsonValueKind.Array && mm.GetArrayLength() > 0;
+
             return new Probe(nodeId, baseUrl, new Uri(baseUrl).Port, Str("role") ?? "?", Num("term"), Str("leaderId"), Num("commitIndex"),
                 Num("lastApplied"), Num("lastLogIndex"), Num("snapshotIndex"), Bool("healthy"), Bool("stateMachineHealthy"),
-                Str("stateMachineError"), Str("unhealthyReason"), ready, reason);
+                Str("stateMachineError"), Str("unhealthyReason"), ready, reason, endpoints, mismatch);
         }
         catch (Exception) when (!ct.IsCancellationRequested) { return null; }
     }

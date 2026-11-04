@@ -44,7 +44,7 @@ public sealed class UdpDiscoveryService : BackgroundService
                 var (role, term) = _node.GetRoleAndTerm();
                 var msg = new DiscoveryMessage
                 {
-                    ClusterId = _cfg.ClusterId, ClusterSize = _cfg.ClusterSize, MembersHash = _members.Hash,
+                    ProtocolVersion = ProtocolInfo.Version, ClusterId = _cfg.ClusterId, ClusterSize = _cfg.ClusterSize, MembersHash = _members.Hash,
                     NodeId = _members.SelfId, RestUrl = _url, Role = role, Term = term,
                     Incarnation = _incarnation, Sequence = Interlocked.Increment(ref _sequence)
                 };
@@ -82,6 +82,15 @@ public sealed class UdpDiscoveryService : BackgroundService
         msg.NodeId = ClusterConfig.Norm(msg.NodeId);
         if (msg.NodeId == _members.SelfId) return false;
 
+        // 0) versione di protocollo (REQ-VER-1): un annuncio di un'altra versione si scarta senza fidarsi di altro.
+        //    Il campo entra anche nell'HMAC, quindi non può essere alterato in un annuncio accettato.
+        if (msg.ProtocolVersion != ProtocolInfo.Version)
+        {
+            _metrics.Inc("rpcProtocolMismatch");
+            if (_throttle.ShouldLog("proto:" + msg.NodeId))
+                _log.LogError("ALLARME: annuncio da {Node} con versione di protocollo {Remote} (locale {Local}) ignorato", msg.NodeId, msg.ProtocolVersion, ProtocolInfo.Version);
+            return false;
+        }
         // 1) HMAC (REQ-SEC-2) - prima di fidarsi di qualunque campo
         if (!CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(ComputeHmac(msg)), Encoding.ASCII.GetBytes(msg.Hmac ?? "")))
         { _metrics.Inc("udpInvalidHmac"); return false; }
@@ -118,7 +127,7 @@ public sealed class UdpDiscoveryService : BackgroundService
     private string ComputeHmac(DiscoveryMessage m)
     {
         // HMAC su TUTTI i campi (REQ-DIS-1)
-        var raw = string.Join("\n", m.ClusterId, m.ClusterSize, m.MembersHash, m.NodeId, m.RestUrl, (int)m.Role, m.Term, m.Incarnation, m.Sequence);
+        var raw = string.Join("\n", "v" + m.ProtocolVersion, m.ClusterId, m.ClusterSize, m.MembersHash, m.NodeId, m.RestUrl, (int)m.Role, m.Term, m.Incarnation, m.Sequence);
         return Convert.ToHexString(HMACSHA256.HashData(_key, Encoding.UTF8.GetBytes(raw))).ToLowerInvariant();
     }
 }

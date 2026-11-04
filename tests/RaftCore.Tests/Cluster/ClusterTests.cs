@@ -275,7 +275,7 @@ public class ClusterTests
     public async Task Poison_entry_is_quarantined_and_cluster_continues()
     {
         await using var c = TestCluster.Create(3);
-        c.RepositoryFactory = (i, cfg) => new SharedFileDataRepository(cfg.StateMachine.SharedFile, true)
+        c.RepositoryFactory = (i, cfg) => new SharedFileDataRepository(cfg.StateMachine.SharedFile, true, cfg.Endpoints.Select(e => e.Name))
         {
             FaultInjector = e => System.Text.Encoding.UTF8.GetString(e.Payload).Contains("poison") ? new InvalidOperationException("bug applicativo") : null
         };
@@ -294,7 +294,7 @@ public class ClusterTests
     {
         await using var c = TestCluster.Create(3);
         int failures = 0;
-        c.RepositoryFactory = (i, cfg) => new SharedFileDataRepository(cfg.StateMachine.SharedFile, true)
+        c.RepositoryFactory = (i, cfg) => new SharedFileDataRepository(cfg.StateMachine.SharedFile, true, cfg.Endpoints.Select(e => e.Name))
         {
             FaultInjector = e => e.EntryType == LogEntryType.Data && Interlocked.Increment(ref failures) <= 8 ? new IOException("database non raggiungibile") : null
         };
@@ -343,9 +343,11 @@ public class ClusterTests
         await c.StartAsync(followers[0], allowEmpty: false);
         await c.WaitUntilAsync(() => c.Raft(l).IsLeader, TimeSpan.FromSeconds(20), "rielezione dell'ex Leader");
         await c.StartAsync(followers[1], allowEmpty: false);
+        // Attesa esplicita sulla voce: subito dopo la rielezione commitIndex può essere ancora quello precedente
+        // (la no-op del nuovo term non è committata), e "applied >= commit" risulterebbe vero troppo presto.
         await c.WaitUntilAsync(() => c.LeaderIndex() is int x && c.Raft(x).GetReadiness().Ready
-                                     && c.Raft(x).Probe().Commit > 0 && c.Raft(x).Probe().Applied >= c.Raft(x).Probe().Commit,
-            TimeSpan.FromSeconds(20), "Leader con tutte le voci committed applicate");
+                                     && c.AppliedRows().Any(r => r.RequestId == rid),
+            TimeSpan.FromSeconds(20), "voce in sospeso committata e applicata dal Leader rieletto");
         var row = c.AppliedRows().Single(r => r.RequestId == rid);
         Assert.Equal(ApplyStatus.Expired, row.Status);                                  // committata dopo 14 giorni: scaduta, non scritta
         Assert.Equal("", row.Payload);

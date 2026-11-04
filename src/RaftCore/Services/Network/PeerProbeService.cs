@@ -23,6 +23,7 @@ public sealed class PeerProbeService : BackgroundService
     private readonly RaftNode _node;
     private readonly Metrics _metrics;
     private readonly HttpClient _http;
+    private readonly EndpointCatalog _endpoints;
     private readonly ILogger<PeerProbeService> _log;
     private readonly LogThrottle _throttle = new(TimeSpan.FromSeconds(60));
     private readonly long _startedMs = Environment.TickCount64;
@@ -30,9 +31,9 @@ public sealed class PeerProbeService : BackgroundService
     private const int WarnGraceMs = 15_000;
 
     public PeerProbeService(ClusterConfig cfg, Membership members, PeerRegistry registry, RaftNode node, Metrics metrics,
-        IHttpClientFactory f, ILogger<PeerProbeService> log)
+        IHttpClientFactory f, EndpointCatalog endpoints, ILogger<PeerProbeService> log)
     {
-        _cfg = cfg; _members = members; _registry = registry; _node = node; _metrics = metrics; _http = f.CreateClient("probe"); _log = log;
+        _cfg = cfg; _members = members; _registry = registry; _node = node; _metrics = metrics; _http = f.CreateClient("probe"); _endpoints = endpoints; _log = log;
     }
 
     /// <summary>Coppie host:porta da sondare.</summary>
@@ -112,13 +113,14 @@ public sealed class PeerProbeService : BackgroundService
             var req = new HelloRequest
             {
                 ClusterId = _cfg.ClusterId, ClusterSize = _cfg.ClusterSize, MembersHash = _members.Hash, SenderNodeId = _members.SelfId,
-                DestNodeId = RpcAuth.AnyDestination, SenderUrl = _node.SelfUrl
+                DestNodeId = RpcAuth.AnyDestination, SenderUrl = _node.SelfUrl, EndpointsHash = _endpoints.Hash
             };
             var body = JsonSerializer.SerializeToUtf8Bytes(req, Json);
             long ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var nonce = Guid.NewGuid().ToString("N");
             using var msg = new HttpRequestMessage(HttpMethod.Post, url + RpcAuth.HelloPath) { Content = new ByteArrayContent(body) };
             msg.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+            msg.Headers.TryAddWithoutValidation(RpcAuth.HProtocol, ProtocolInfo.Version.ToString());
             msg.Headers.TryAddWithoutValidation(RpcAuth.HNode, _members.SelfId);
             msg.Headers.TryAddWithoutValidation(RpcAuth.HTime, ts.ToString());
             msg.Headers.TryAddWithoutValidation(RpcAuth.HNonce, nonce);
@@ -130,9 +132,11 @@ public sealed class PeerProbeService : BackgroundService
             var bytes = await res.Content.ReadAsByteArrayAsync(cts.Token);
             string responder = res.Headers.TryGetValues(RpcAuth.HNode, out var n) ? ClusterConfig.Norm(n.First()) : "";
             string sig = res.Headers.TryGetValues(RpcAuth.HSig, out var s) ? s.First() : "";
-            if (responder.Length == 0 || !RpcAuth.FixedEquals(RpcAuth.SignResponse(_cfg.ClusterSecret, responder, nonce, 200, bytes), sig)) return null;
+            string remoteEndpoints = res.Headers.TryGetValues(RpcAuth.HEndpoints, out var eh) ? eh.First() : "";
+            if (responder.Length == 0 || !RpcAuth.FixedEquals(RpcAuth.SignResponse(_cfg.ClusterSecret, responder, nonce, 200, bytes, remoteEndpoints), sig)) return null;
             var hello = JsonSerializer.Deserialize<HelloResponse>(bytes, Json);
             if (hello == null || ClusterConfig.Norm(hello.NodeId) != responder || responder == _members.SelfId || !_members.Contains(responder)) return null;
+            _endpoints.NoteRemote(responder, remoteEndpoints);
             return responder;
         }
         catch { return null; }                                                      // porta chiusa, altro servizio, timeout

@@ -13,6 +13,8 @@ public sealed class SimulatorOptions
     public int StatusTimeoutMs { get; set; } = 500;
     public int DefaultIntervalMs { get; set; } = 200;
     public string DefaultTarget { get; set; } = "RoundRobin";
+    /// <summary>Nome dell'endpoint iniziale dell'invio ciclico; vuoto = tutti gli endpoint a rotazione.</summary>
+    public string DefaultEndpoint { get; set; } = "";
     public int MaxInFlight { get; set; } = 64;
     public int RequestTimeoutMs { get; set; } = 15000;
     public int RetryBudgetMs { get; set; } = 60000;
@@ -111,11 +113,12 @@ public sealed class DataClient
 
     public HttpClient Http => _http;
 
-    public async Task<PostResult> PostDataAsync(string baseUrl, string? requestId, byte[] body, int timeoutMs,
+    /// <param name="path">Path dell'endpoint di ingestione (es. /api/v1/misure), letto dallo stato dei nodi.</param>
+    public async Task<PostResult> PostDataAsync(string baseUrl, string path, string? requestId, byte[] body, int timeoutMs,
         IEnumerable<KeyValuePair<string, string>>? extraHeaders = null, CancellationToken ct = default)
     {
         var sw = Stopwatch.StartNew();
-        using var req = new HttpRequestMessage(HttpMethod.Post, baseUrl.TrimEnd('/') + "/api/v1/data");
+        using var req = new HttpRequestMessage(HttpMethod.Post, baseUrl.TrimEnd('/') + path);
         req.Content = new ByteArrayContent(body);                                   // stessi byte a ogni tentativo (REQ-IDM-8)
         req.Content.Headers.TryAddWithoutValidation("Content-Type", "application/json");
         if (requestId != null) req.Headers.TryAddWithoutValidation("X-Request-ID", requestId);

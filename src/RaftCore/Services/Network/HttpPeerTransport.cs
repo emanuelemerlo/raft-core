@@ -20,12 +20,14 @@ public sealed class HttpPeerTransport : IPeerTransport
     private readonly string _self;
     private readonly PeerRegistry _registry;
     private readonly Metrics _metrics;
+    private readonly EndpointCatalog _endpoints;
     private readonly ILogger<HttpPeerTransport> _log;
     private readonly LogThrottle _throttle = new(TimeSpan.FromSeconds(30));
 
-    public HttpPeerTransport(IHttpClientFactory f, ClusterConfig cfg, Core.Membership members, PeerRegistry registry, Metrics metrics, ILogger<HttpPeerTransport> log)
+    public HttpPeerTransport(IHttpClientFactory f, ClusterConfig cfg, Core.Membership members, PeerRegistry registry, Metrics metrics,
+        EndpointCatalog endpoints, ILogger<HttpPeerTransport> log)
     {
-        _http = f.CreateClient("raft-rpc"); _cfg = cfg; _self = members.SelfId; _registry = registry; _metrics = metrics; _log = log;
+        _http = f.CreateClient("raft-rpc"); _cfg = cfg; _self = members.SelfId; _registry = registry; _metrics = metrics; _endpoints = endpoints; _log = log;
     }
 
     public async Task<RpcResult<TResp>> SendAsync<TReq, TResp>(PeerEndpoint peer, string path, TReq request, TimeSpan timeout, CancellationToken ct)
@@ -34,11 +36,13 @@ public sealed class HttpPeerTransport : IPeerTransport
         try
         {
             request.DestNodeId = peer.NodeId;
+            request.EndpointsHash = _endpoints.Hash;
             var body = JsonSerializer.SerializeToUtf8Bytes(request, Json);
             long ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var nonce = Guid.NewGuid().ToString("N");
             using var msg = new HttpRequestMessage(HttpMethod.Post, peer.Url.TrimEnd('/') + path) { Content = new ByteArrayContent(body) };
             msg.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+            msg.Headers.TryAddWithoutValidation(RpcAuth.HProtocol, ProtocolInfo.Version.ToString());
             msg.Headers.TryAddWithoutValidation(RpcAuth.HNode, _self);
             msg.Headers.TryAddWithoutValidation(RpcAuth.HTime, ts.ToString());
             msg.Headers.TryAddWithoutValidation(RpcAuth.HNonce, nonce);
@@ -51,8 +55,9 @@ public sealed class HttpPeerTransport : IPeerTransport
 
             string responder = res.Headers.TryGetValues(RpcAuth.HNode, out var n) ? ClusterConfig.Norm(n.First()) : "";
             string sig = res.Headers.TryGetValues(RpcAuth.HSig, out var s) ? s.First() : "";
+            string remoteEndpoints = res.Headers.TryGetValues(RpcAuth.HEndpoints, out var eh) ? eh.First() : "";
             bool signed = sig.Length > 0 && responder.Length > 0
-                && RpcAuth.FixedEquals(RpcAuth.SignResponse(_cfg.ClusterSecret, responder, nonce, status, respBytes), sig);
+                && RpcAuth.FixedEquals(RpcAuth.SignResponse(_cfg.ClusterSecret, responder, nonce, status, respBytes, remoteEndpoints), sig);
 
             if (signed && responder != peer.NodeId)
             {
@@ -64,6 +69,8 @@ public sealed class HttpPeerTransport : IPeerTransport
                 return new RpcResult<TResp>(0, default);
             }
             if (status == 421 && signed) { _registry.InvalidateUrl(peer.NodeId, peer.Url); return new RpcResult<TResp>(0, default); }
+            if (status == 409 && !signed && _throttle.ShouldLog("conflict:" + peer.NodeId))
+                _log.LogWarning("RPC rifiutata da {Peer} (409): versione di protocollo o configurazione dei membri diversa", peer.NodeId);
             if (status != 200) return new RpcResult<TResp>(status, default);
             if (!signed)
             {
@@ -73,6 +80,7 @@ public sealed class HttpPeerTransport : IPeerTransport
                 return new RpcResult<TResp>(0, default);
             }
             _registry.NoteSuccess(peer.NodeId);
+            _endpoints.NoteRemote(peer.NodeId, remoteEndpoints);
             return new RpcResult<TResp>(200, JsonSerializer.Deserialize<TResp>(respBytes, Json));
         }
         catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException && !ct.IsCancellationRequested)

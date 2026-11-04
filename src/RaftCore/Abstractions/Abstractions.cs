@@ -50,7 +50,8 @@ public interface IUdpChannel
 /// restituisce l'esito già registrato (Replay), se entry.Index &gt; LastApplied + 1 lancia <see cref="ApplyGapException"/>.
 /// Così un nodo rientrato dopo settimane, o un ex Leader, non riscrive mai dati già scritti.</item>
 /// <item>Gli errori di business permanenti (vincoli, conversioni, payload non valido) NON vengono rilanciati:
-/// l'esito Rejected viene registrato e LastApplied avanza.</item>
+/// l'esito Rejected viene registrato e LastApplied avanza. Lo stesso vale per una voce il cui PayloadType (endpoint)
+/// non è configurato sul nodo che applica.</item>
 /// <item>Le voci più vecchie di <see cref="ApplyContext.MaxPendingAge"/> producono l'esito Expired senza scrivere dati.</item>
 /// <item>Ogni altra eccezione viene ritentata dal nodo; se <see cref="IsTransient"/> è false, dopo MaxApplyAttempts la voce
 /// viene messa in quarantena con <see cref="QuarantineAsync"/> (poison entry).</item>
@@ -73,6 +74,12 @@ public sealed class ApplyGapException : Exception
     public long DatabaseLastApplied { get; }
     public ApplyGapException(long dbLast, long requested)
         : base($"LastApplied nel database = {dbLast}, voce richiesta = {requested}") => DatabaseLastApplied = dbLast;
+}
+
+/// <summary>Il database contiene tabelle di servizio di un'altra versione (REQ-VER-2): il Leader non applica finché non viene risolto.</summary>
+public sealed class SchemaVersionException : Exception
+{
+    public SchemaVersionException(string message) : base(message) { }
 }
 
 /// <summary>Errore di business permanente sollevato da un writer applicativo: la voce viene registrata come Rejected.</summary>
@@ -110,6 +117,10 @@ public static class Outcomes
         new(ApplyStatus.Expired, 410, Json(new { error = "expired", detail = "richiesta rimasta in sospeso oltre MaxPendingAge: non scritta", receivedUtc, logIndex = index, requestId }), index);
 
     public static ApplyOutcome NoOp(long index) => new(ApplyStatus.NoOp, 200, Array.Empty<byte>(), index);
+
+    /// <summary>Motivo del rifiuto di una voce di un endpoint che l'applicatore non conosce (REQ-EPT-4).</summary>
+    public static string UnknownPayloadType(string payloadType) =>
+        $"endpoint '{payloadType}' non configurato sul nodo che ha applicato la voce: allineare Endpoints su tutti i nodi";
 
     public static string Truncate(string s) => s.Length <= 500 ? s : s[..500];
 

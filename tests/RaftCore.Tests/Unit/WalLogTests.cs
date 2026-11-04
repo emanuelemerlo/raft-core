@@ -9,7 +9,7 @@ namespace RaftCore.Tests.Unit;
 public class WalLogTests
 {
     private static WalInput Data(long idx, long term, string? payload = null) =>
-        new(idx, term, LogEntryType.Data, Guid.NewGuid().ToString(), new string('a', 64), DateTime.UtcNow.Ticks,
+        new(idx, term, LogEntryType.Data, Guid.NewGuid().ToString(), "misure", new string('a', 64), DateTime.UtcNow.Ticks,
             Encoding.UTF8.GetBytes(payload ?? $"{{\"i\":{idx}}}"));
 
     private static WalLog Open(string dir, long segBytes = 64 * 1024 * 1024)
@@ -18,6 +18,39 @@ public class WalLogTests
         var r = w.Open();
         Assert.False(r.CorruptNonFinal, r.Message);
         return w;
+    }
+
+    [Fact]
+    public void Payload_type_is_persisted_and_replicated_with_the_entry()
+    {
+        using var d = new TempDir();
+        using (var w = Open(d.Path))
+        {
+            w.Append(0, new[] { Data(1, 1), new WalInput(2, 1, LogEntryType.Data, Guid.NewGuid().ToString(), "eventi", "h", DateTime.UtcNow.Ticks, "{}"u8.ToArray()),
+                new WalInput(3, 1, LogEntryType.NoOp, Guid.NewGuid().ToString(), "", "", DateTime.UtcNow.Ticks, default) });
+            Assert.Equal("eventi", w.ReadEntry(2)!.PayloadType);
+        }
+        using var w2 = Open(d.Path);
+        Assert.Equal("misure", w2.ReadEntry(1)!.PayloadType);
+        Assert.Equal("eventi", w2.GetMeta(2)!.PayloadType);
+        Assert.Equal("{}", Encoding.UTF8.GetString(w2.ReadEntry(2)!.Payload));
+        Assert.Equal("", w2.ReadEntry(3)!.PayloadType);
+    }
+
+    [Fact]
+    public void Wal_of_another_format_blocks_opening_and_is_not_truncated_T64()
+    {
+        using var d = new TempDir();
+        using (var w = Open(d.Path)) w.Append(0, new[] { Data(1, 1), Data(2, 1) });
+        var seg = Directory.GetFiles(d.Path, "*.wal").Single();
+        var bytes = File.ReadAllBytes(seg);
+        bytes[4] = 1;                                                          // versione del record: formato della v0.2
+        File.WriteAllBytes(seg, bytes);
+        using var w2 = new WalLog(d.Path, true, 64 * 1024 * 1024);
+        var r = w2.Open();
+        Assert.True(r.FormatMismatch);
+        Assert.Contains("formato 1", r.Message);
+        Assert.Equal(bytes.Length, new FileInfo(seg).Length);                  // nessun troncamento "di recovery"
     }
 
     [Fact]

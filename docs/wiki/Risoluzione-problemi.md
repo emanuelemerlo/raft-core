@@ -17,11 +17,29 @@ Un'altra istanza usa la stessa DataDir. Sulla stessa macchina ogni istanza deve 
 ### Il nodo non parte: "Nessuna porta REST disponibile" (codice 4)
 Tutte le porte di `RestPorts` sono occupate: aggiungere porte all'elenco (es. `5001-5010;5020-5030`).
 
+### Il nodo non parte: "WAL in formato 1" (codice 2)
+La `DataDir` contiene un WAL scritto dalla versione 0.2, che non viene migrato. Vedere [Operazioni](Operazioni) → aggiornamento dalla 0.2 alla 0.3.
+
+### Il nodo non parte: errori su `Endpoints` (codice 1)
+Il messaggio elenca le violazioni: nessun endpoint, `Name`, `Path` o `Table` duplicati, path riservato (`/internal`, `/health`, `/api/v1/cluster`, `/api/v1/metrics`), `Table` mancante per un endpoint senza writer personalizzato, writer registrato senza nome (`AddSingleton<ISqlPayloadWriter, …>` della 0.2: usare `AddPayloadWriter<T>("nome")`) o per un nome che non è in `Endpoints`. Vedere [Configurazione](Configurazione) → endpoint.
+
+### Un nodo aggiornato non entra nel cluster
+I nodi con versioni di protocollo diverse si rifiutano a vicenda: nei log compare `versione di protocollo` e cresce `rpcProtocolMismatch`. Aggiornare tutti i nodi alla stessa versione.
+
+### Una richiesta riceve 404
+Il path non corrisponde a nessun endpoint del nodo che risponde (o del Leader, se la richiesta è stata inoltrata). Controllare l'URL e `endpoints` in `GET /api/v1/cluster/status`; durante l'aggiunta di un endpoint, attendere che tutti i nodi siano aggiornati.
+
+### Il Leader è Not Ready con "SchemaVersion" in `stateMachineError`
+Il database contiene tabelle di servizio di una versione precedente. Vedere [SQL Server](SQL-Server) → versione dello schema.
+
 ### Le scritture restano in attesa e poi danno 504
 Il Leader non riesce a scrivere sul database. Controllare `GET /api/v1/cluster/status` sul Leader (`stateMachineHealthy`, `stateMachineError`) e le metriche `applyLag` e `applyTransientErrors`. Le richieste non vanno perse: ritentate con lo stesso ID, ricevono l'esito quando il database torna disponibile.
 
 ### Una richiesta riceve 422 "quarantined" o "rejected"
-Vedere [SQL Server](SQL-Server) → errori e poison entry.
+Vedere [SQL Server](SQL-Server) → errori e poison entry. Un `reason` che cita un endpoint non configurato indica una configurazione `Endpoints` diversa tra i nodi.
+
+### Una richiesta riceve 422 "RequestId già associato a un payload diverso"
+Lo stesso `X-Request-ID` è stato usato con un body diverso, oppure su un altro endpoint. Ogni operazione ha un ID proprio, unico in tutto il cluster.
 
 ### Una richiesta riceve 410 "expired"
 La richiesta era rimasta in sospeso oltre `MaxPendingAgeMinutes` (es. cluster rimasto a lungo senza quorum) e non è stata scritta di proposito. Se il dato è ancora valido, inviarlo con un nuovo `X-Request-ID`.

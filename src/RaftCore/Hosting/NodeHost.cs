@@ -161,11 +161,12 @@ public static class NodeHost
             builder.Services.AddSingleton<Metrics>();
             builder.Services.AddSingleton<PeerRegistry>();
             builder.Services.AddSingleton<RpcVerifier>();
+            builder.Services.AddSingleton<EndpointCatalog>();
             builder.Services.AddSingleton<IDataRepository>(sp => config.StateMachine.Provider switch
             {
                 StateMachineProvider.SqlServer => new SqlServerDataRepository(config.StateMachine.SqlServer, config.ClusterId, membership.SelfId,
-                    sp.GetService<ISqlPayloadWriter>()),
-                _ => new SharedFileDataRepository(config.StateMachine.SharedFile, config.Storage.FsyncOnCommit)
+                    BuildWriters(sp, config)),
+                _ => new SharedFileDataRepository(config.StateMachine.SharedFile, config.Storage.FsyncOnCommit, config.Endpoints.Select(e => e.Name))
             });
             // ConnectTimeout corto sui client RPC: verso un peer irraggiungibile (nodo giù) la sola connessione
             // fallisce subito, senza occupare la RPC fino al suo timeout. Accorcia e stabilizza il failover.
@@ -190,6 +191,8 @@ public static class NodeHost
             builder.Services.AddHostedService(sp => sp.GetRequiredService<PeerProbeService>());
             builder.Services.AddSingleton<ClientApi>();
             configure?.Invoke(builder.Services, config);
+            try { ValidateWriters(builder.Services, config); }
+            catch (ConfigurationValidationException ex) { throw new NodeStartException(ExitCodes.Configuration, ex.Message, ex); }
 
             var app = builder.Build();
             var node = app.Services.GetRequiredService<RaftNode>();
@@ -208,8 +211,10 @@ public static class NodeHost
                 await app.DisposeAsync();
                 throw new PortInUseException(ex.Message, ex);
             }
-            app.Logger.LogInformation("Nodo {Node} avviato su {Url} (cluster {Cluster}, {Size} membri, state machine {Sm}, dati in {Dir})",
-                membership.SelfId, NetworkHelper.ResolveAdvertiseUrl(config), config.ClusterId, config.ClusterSize, config.StateMachine.Provider, config.Storage.DataDir);
+            app.Logger.LogInformation("Nodo {Node} avviato su {Url} (cluster {Cluster}, {Size} membri, protocollo v{Protocol}, state machine {Sm}, dati in {Dir})",
+                membership.SelfId, NetworkHelper.ResolveAdvertiseUrl(config), config.ClusterId, config.ClusterSize, ProtocolInfo.Version, config.StateMachine.Provider, config.Storage.DataDir);
+            app.Logger.LogInformation("Endpoint di ingestione: {Endpoints}",
+                string.Join(", ", config.Endpoints.Select(e => $"{e.Name} -> POST {e.Path}")));
             return new RunningNode(app, config, dataLock);
         }
         catch
@@ -218,6 +223,31 @@ public static class NodeHost
             throw;
         }
     }
+
+    /// <summary>
+    /// REQ-EPT-1/4: con SQL Server ogni endpoint ha un writer, registrato con il suo nome (AddPayloadWriter) oppure quello JSON
+    /// di default sulla sua Table. Controllato prima di costruire l'applicazione: una lacuna impedisce l'avvio (codice 1).
+    /// </summary>
+    internal static void ValidateWriters(IServiceCollection services, ClusterConfig cfg)
+    {
+        var registrations = services.Where(d => d.ServiceType == typeof(ISqlPayloadWriter)).ToList();
+        var v = new List<string>();
+        if (registrations.Any(d => !d.IsKeyedService))
+            v.Add("ISqlPayloadWriter registrato senza nome di endpoint: usare services.AddPayloadWriter<T>(\"nome\").");
+        var named = registrations.Where(d => d.IsKeyedService).Select(d => d.ServiceKey as string ?? "").ToHashSet(StringComparer.Ordinal);
+        var names = cfg.Endpoints.Select(e => e.Name).ToHashSet(StringComparer.Ordinal);
+        foreach (var n in named.Where(n => !names.Contains(n)))
+            v.Add($"Writer registrato per l'endpoint '{n}', che non compare in Endpoints.");
+        if (cfg.StateMachine.Provider == StateMachineProvider.SqlServer)
+            foreach (var e in cfg.Endpoints.Where(e => e.Table == null && !named.Contains(e.Name)))
+                v.Add($"Endpoints ({e.Name}): Table obbligatoria, perché non è registrato un writer personalizzato per questo endpoint.");
+        if (v.Count > 0) throw new ConfigurationValidationException(v);
+    }
+
+    private static Dictionary<string, ISqlPayloadWriter> BuildWriters(IServiceProvider sp, ClusterConfig cfg) =>
+        cfg.Endpoints.ToDictionary(e => e.Name,
+            e => sp.GetKeyedService<ISqlPayloadWriter>(e.Name) ?? new JsonPayloadWriter(e.Table!, cfg.StateMachine.SqlServer.CommandTimeoutSeconds),
+            StringComparer.Ordinal);
 
     private static bool IsAddressInUse(Exception? ex)
     {
@@ -277,7 +307,8 @@ public static class NodeHost
             return status == 200 ? Results.Json(resp) : Results.StatusCode(status);
         });
 
-        // ---- API pubblica
-        app.MapPost("/api/v1/data", (HttpContext ctx, ClientApi api) => api.HandleAsync(ctx));
+        // ---- API pubblica: un POST per ogni endpoint di ingestione configurato (REQ-EPT-1); altri path -> 404
+        foreach (var endpoint in app.Services.GetRequiredService<EndpointCatalog>().Endpoints)
+            app.MapPost(endpoint.Path, (HttpContext ctx, ClientApi api) => api.HandleAsync(ctx, endpoint));
     }
 }

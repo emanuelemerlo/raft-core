@@ -1,5 +1,6 @@
 using System.Text.Json;
 using RaftCore.Configuration;
+using RaftCore.Models;
 using RaftCore.Services.Common;
 using RaftCore.Services.Core;
 using RaftCore.Services.Network;
@@ -8,8 +9,9 @@ namespace RaftCore.Services.Http;
 
 /// <summary>
 /// Autenticazione delle RPC interne (§16) e firma delle loro risposte.
-/// Ordine: header e appartenenza e finestra temporale (senza leggere il body), poi HMAC, destinatario, nonce,
-/// ClusterId/ClusterSize/MembersHash (REQ-CLU-4/5, REQ-SEC-3/4). La risposta viene firmata con l'identità del nodo.
+/// Ordine: header, versione di protocollo, appartenenza e finestra temporale (senza leggere il body), poi HMAC, destinatario,
+/// nonce, ClusterId/ClusterSize/MembersHash (REQ-CLU-4/5, REQ-SEC-3/4, REQ-VER-1). L'impronta degli endpoint del mittente
+/// viene solo confrontata. La risposta viene firmata con l'identità del nodo e porta l'impronta locale degli endpoint.
 /// </summary>
 public sealed class SecurityMiddleware
 {
@@ -20,11 +22,13 @@ public sealed class SecurityMiddleware
     private readonly PeerRegistry _registry;
     private readonly RpcVerifier _verifier;
     private readonly Metrics _metrics;
+    private readonly EndpointCatalog _endpoints;
     private readonly ILogger<SecurityMiddleware> _log;
     private readonly LogThrottle _throttle = new(TimeSpan.FromSeconds(30));
 
-    public SecurityMiddleware(RequestDelegate next, ClusterConfig cfg, Membership members, PeerRegistry registry, RpcVerifier verifier, Metrics metrics, ILogger<SecurityMiddleware> log)
-    { _next = next; _cfg = cfg; _members = members; _registry = registry; _verifier = verifier; _metrics = metrics; _log = log; }
+    public SecurityMiddleware(RequestDelegate next, ClusterConfig cfg, Membership members, PeerRegistry registry, RpcVerifier verifier, Metrics metrics,
+        EndpointCatalog endpoints, ILogger<SecurityMiddleware> log)
+    { _next = next; _cfg = cfg; _members = members; _registry = registry; _verifier = verifier; _metrics = metrics; _endpoints = endpoints; _log = log; }
 
     public async Task InvokeAsync(HttpContext ctx)
     {
@@ -49,6 +53,7 @@ public sealed class SecurityMiddleware
             string sender = r.TryGetProperty("senderNodeId", out var d) ? d.GetString() ?? "" : "";
             string dest = r.TryGetProperty("destNodeId", out var f) ? f.GetString() ?? "" : "";
             string url = r.TryGetProperty("senderUrl", out var e) ? e.GetString() ?? "" : "";
+            string endpointsHash = r.TryGetProperty("endpointsHash", out var eh) ? eh.GetString() ?? "" : "";
             if (ClusterConfig.Norm(sender) != node || !RpcAuth.DestinationMatches(dest, _members.SelfId, ctx.Request.Path.Value)) { ctx.Response.StatusCode = 400; return; }
             if (cid != _cfg.ClusterId || size != _cfg.ClusterSize || mh != _members.Hash)
             {
@@ -58,6 +63,7 @@ public sealed class SecurityMiddleware
                 ctx.Response.StatusCode = 409; return;
             }
             _registry.NoteRpcUrl(node, url);
+            _endpoints.NoteRemote(node, endpointsHash);
         }
         catch (Exception) { ctx.Response.StatusCode = 400; return; }
 
@@ -72,14 +78,22 @@ public sealed class SecurityMiddleware
         finally { ctx.Response.Body = original; }
         var respBytes = buffer.ToArray();
         ctx.Response.Headers[RpcAuth.HNode] = _members.SelfId;
-        ctx.Response.Headers[RpcAuth.HSig] = RpcAuth.SignResponse(_cfg.ClusterSecret, _members.SelfId, ctx.Request.Headers[RpcAuth.HNonce].ToString(), ctx.Response.StatusCode, respBytes);
+        ctx.Response.Headers[RpcAuth.HEndpoints] = _endpoints.Hash;
+        ctx.Response.Headers[RpcAuth.HSig] = RpcAuth.SignResponse(_cfg.ClusterSecret, _members.SelfId, ctx.Request.Headers[RpcAuth.HNonce].ToString(),
+            ctx.Response.StatusCode, respBytes, _endpoints.Hash);
         ctx.Response.ContentLength = respBytes.Length;
         await original.WriteAsync(respBytes, ctx.RequestAborted);
     }
 
     private void Reject(HttpContext ctx, RpcVerifyResult r, string node)
     {
-        if (r is RpcVerifyResult.NonMember or RpcVerifyResult.ClockSkew or RpcVerifyResult.WrongDestination && _throttle.ShouldLog(r + ":" + node))
+        if (r == RpcVerifyResult.ProtocolMismatch)
+        {
+            if (_throttle.ShouldLog("protocol:" + node))
+                _log.LogError("ALLARME: RPC da {Node} con versione di protocollo {Remote} (locale {Local}) rifiutata: aggiornare tutti i nodi alla stessa versione",
+                    node, RpcAuth.ProtocolOf(ctx.Request.Headers), ProtocolInfo.Version);
+        }
+        else if (r is RpcVerifyResult.NonMember or RpcVerifyResult.ClockSkew or RpcVerifyResult.WrongDestination && _throttle.ShouldLog(r + ":" + node))
             _log.LogWarning("ALLARME: RPC da {Node} rifiutata ({Reason})", node, r);
         ctx.Response.StatusCode = RpcVerifier.HttpStatusFor(r);
         if (r == RpcVerifyResult.WrongDestination)

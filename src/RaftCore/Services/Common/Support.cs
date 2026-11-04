@@ -160,7 +160,7 @@ public sealed class Metrics
         "requestFailureCount", "requestRejectedOverload", "walWriteErrors", "udpInvalidHmac", "udpReplayRejected", "rpcClockSkewRejected",
         "membersHashMismatch", "nonMemberRejected", "rpcInvalidAuth", "rpcReplayRejected", "rpcWrongDestination", "rpcResponseAuthFailed",
         "applyTransientErrors", "applyErrors", "applyQuarantined", "applyRejected", "applyExpired", "snapshotsInstalled", "snapshotsSent",
-        "compactions", "forwardUntrustedHeaders", "peerUrlUnknown", "writeBatches"
+        "compactions", "forwardUntrustedHeaders", "peerUrlUnknown", "writeBatches", "rpcProtocolMismatch", "endpointsHashMismatch", "applyUnknownType"
     };
 
     public Dictionary<string, long> Snapshot()

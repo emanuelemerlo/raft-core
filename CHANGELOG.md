@@ -5,7 +5,20 @@ Il workflow di release usa la sezione della versione come note di rilascio.
 
 ## [Unreleased]
 
+> **Versione incompatibile con la 0.2.** Cambiano versione di protocollo, formato del WAL e schema del database, senza migrazione: vedere [Operazioni](docs/wiki/Operazioni.md) → aggiornamento dalla 0.2 alla 0.3.
+
 ### Aggiunto
+- **Endpoint multipli** (`RaftCluster:Endpoints`): il servizio espone N endpoint `POST`, ciascuno con `Name`, `Path` e `Table`, che ricevono JSON diversi diretti a tabelle diverse.
+  - Tutti gli endpoint condividono un solo log Raft, un solo ordine di scrittura e la stessa idempotenza.
+  - Il nome dell'endpoint viaggia nella voce del log (`LogEntry.PayloadType`) e sceglie il writer all'apply, anche dopo un failover.
+  - Writer personalizzati per endpoint con `services.AddPayloadWriter<T>("nome")`; gli altri endpoint usano il writer JSON di default sulla propria `Table`.
+  - Validazione all'avvio: nomi e path unici, path riservati esclusi, `Table` obbligatoria senza writer personalizzato.
+  - Una voce di un endpoint sconosciuto all'applicatore è registrata come `Rejected` (422); metrica `applyUnknownType`.
+  - `GET /api/v1/cluster/status` elenca gli endpoint configurati.
+- **Versione di protocollo** in ogni RPC e annuncio UDP: i nodi di versioni diverse si rifiutano a vicenda (metrica `rpcProtocolMismatch`).
+- **Impronta della configurazione degli endpoint** in ogni RPC: le differenze tra nodi sono segnalate (metrica `endpointsHashMismatch`, campo `endpointsMismatch` dello stato) senza bloccare il cluster.
+- Tabella `raft.SchemaVersion` e script `sql/002_endpoint_table.sql` per le tabelle degli endpoint.
+- Simulatore: scelta dell'endpoint (letto dallo stato dei nodi), scenari «stesso ID su due endpoint» e «path non configurato», verifica dell'endpoint di ogni scrittura.
 - **Simulatore client** (`src/RaftCore.Simulator`): applicazione web di sviluppo su http://localhost:5100, avviabile con il cluster tramite il profilo multiplo **Cluster + Simulatore** (`RaftCore.slnLaunch`). Comprende:
   - stato dei nodi;
   - invio ciclico di JSON con `seq` progressivo e `timestamp`, con retry conforme al contratto client;
@@ -33,6 +46,19 @@ Il workflow di release usa la sezione della versione come note di rilascio.
   - *Nota:* il restore bloccato dei lockfile NuGet è rinviato per scelta (progetto di ricerca); restano attivi sorgente fissata e Dependabot.
 
 ### Modificato
+- **`POST /api/v1/data` rimosso**: esistono solo gli endpoint configurati; un path sconosciuto risponde 404.
+- L'hash di idempotenza copre il nome dell'endpoint e il body: lo stesso `X-Request-ID` su due endpoint produce 422.
+- Il Follower inoltra al Leader sullo stesso path dell'endpoint, coperto dalla firma.
+- **WAL in formato 2** (tipo della voce): un WAL in formato 1 blocca l'avvio (codice 2).
+- **Schema del database versione 2**: colonna `PayloadType` in `AppliedEntries`, `Requests` e `Quarantine`; con tabelle di una versione precedente il Leader non applica e risulta Not Ready.
+- `appsettings.json` e configurazioni d'esempio con due endpoint, `misure` e `eventi`.
+- `applied.log` della state machine SharedFile con la colonna `PayloadType` (8 campi); un file della 0.2 viene rifiutato.
+- `SqlServerDataRepository` riceve i writer per nome di endpoint; `JsonPayloadWriter` riceve la tabella dell'endpoint.
+- Firma HMAC delle RPC e delle risposte estesa alla versione di protocollo (header `X-Cluster-Protocol`) e, nelle risposte, all'impronta degli endpoint (`X-Cluster-Endpoints`).
+
+### Rimosso
+- `docs/specifica-rev6-delta.md`: sostituito dalla specifica completa rev. 6 (`docs/specifica.md`), pubblicata anche nella wiki come pagina «Specifica».
+- `StateMachine:SqlServer:DataTable` e la tabella `raft.IngestedData`: sostituite da `Endpoints[].Table`.
 - Un segreto `dev-only-…` viene rifiutato fuori dall'ambiente Development.
 - Log della console senza gli scope di tracing (`SpanId`/`TraceId`).
 - **Connessione SQL di produzione** (`deploy/systemd/raftcore.env.example`): `Encrypt=True;TrustServerCertificate=False` (connessione cifrata e certificato del server validato).

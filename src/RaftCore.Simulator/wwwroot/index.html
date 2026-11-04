@@ -156,6 +156,9 @@ code { font-family: var(--mono); font-size: 12px; background: var(--panel-2); pa
           <label class="field">Destinazione
             <select id="target"></select>
           </label>
+          <label class="field">Endpoint
+            <select id="endpoint"></select>
+          </label>
           <label class="field">Riempimento (byte)
             <input type="number" id="pad" min="0" step="1024" value="0">
           </label>
@@ -194,7 +197,7 @@ code { font-family: var(--mono); font-size: 12px; background: var(--panel-2); pa
         </div>
         <div class="scroll">
           <table>
-            <thead><tr><th>#</th><th>Ora</th><th>Request-ID</th><th>Esito</th><th>Percorso (porta:status)</th><th class="num">ms</th></tr></thead>
+            <thead><tr><th>#</th><th>Ora</th><th>Request-ID</th><th>Endpoint</th><th>Esito</th><th>Percorso (porta:status)</th><th class="num">ms</th></tr></thead>
             <tbody id="ops"></tbody>
           </table>
         </div>
@@ -273,6 +276,7 @@ function renderNodes() {
         <dt>Term</dt><dd>${n(nd.term)}</dd>
         <dt>Commit / applied</dt><dd>${n(nd.commitIndex)} / ${n(nd.lastApplied)}</dd>
         <dt>Log (snapshot)</dt><dd>${n(nd.lastLogIndex)} (${n(nd.snapshotIndex)})</dd>
+        <dt>Endpoint</dt><dd${nd.endpointsMismatch ? ' style="color:var(--warn)" title="Configurazione Endpoints diversa tra i nodi"' : ''}>${nd.endpoints.length ? nd.endpoints.map(e => esc(e.name)).join(', ') : '—'}${nd.endpointsMismatch ? ' · diversa tra i nodi' : ''}</dd>
         <dt>Leader noto</dt><dd>${esc(leader ? leader.shortId : (nd.leaderId ? nd.leaderId.slice(0, 8) : '—'))}</dd>
         <dt>Ready</dt><dd title="${esc(nd.readyReason)}">${nd.reachable ? (nd.ready ? 'sì' : 'no') + (nd.readyReason ? ' · ' + esc(nd.readyReason) : '') : '—'}</dd>
         ${!nd.healthy && nd.reachable ? `<dt>Storage</dt><dd style="color:var(--err)" title="${esc(nd.unhealthyReason)}">${esc(nd.unhealthyReason ?? 'non sano')}</dd>` : ''}
@@ -328,12 +332,25 @@ function renderTargets() {
   if (sel.value !== current) { ensureTargetOption(current); sel.value = current; }
 }
 
+function renderEndpoints() {
+  const sel = $('endpoint'), current = sel.dataset.sig ? sel.value : state.generator.settings.endpoint;
+  const opts = [['', 'tutti a rotazione']].concat(state.endpoints.map(e => [e.name, `${e.name} · ${e.path}`]));
+  if (current && !opts.some(o => o[0] === current)) opts.push([current, `${current} · non esposto`]);
+  const sig = opts.map(o => o.join('=')).join('|');
+  if (sel.dataset.sig !== sig) {
+    sel.innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('');
+    sel.dataset.sig = sig;
+  }
+  sel.value = current ?? '';
+}
+
 function readSettings() {
-  return { intervalMs: Number($('interval').value) || 200, target: $('target').value || 'RoundRobin', padBytes: Number($('pad').value) || 0 };
+  return { intervalMs: Number($('interval').value) || 200, target: $('target').value || 'RoundRobin', padBytes: Number($('pad').value) || 0,
+    endpoint: $('endpoint').value || '' };
 }
 async function pushSettings() { await call('/sim/generator/settings', readSettings()).catch(() => { }); settingsDirty = false; }
 ['interval', 'pad'].forEach(id => $(id).addEventListener('input', () => settingsDirty = true));
-['interval', 'pad', 'target'].forEach(id => $(id).addEventListener('change', pushSettings));
+['interval', 'pad', 'target', 'endpoint'].forEach(id => $(id).addEventListener('change', pushSettings));
 
 $('startStop').onclick = async () => {
   if (state.generator.running) await call('/sim/generator/stop');
@@ -354,7 +371,7 @@ function renderGenerator() {
   $('startStop').textContent = g.running ? 'Ferma' : 'Avvia';
   $('startStop').className = g.running ? 'danger solid' : 'primary';
   $('genChip').className = 'chip ' + (g.running ? 'ok' : '');
-  $('genChip').innerHTML = g.running ? `<span class="dot"></span>in invio · ogni ${g.settings.intervalMs} ms · ${esc(g.targetLabel)}` : 'fermo';
+  $('genChip').innerHTML = g.running ? `<span class="dot"></span>in invio · ogni ${g.settings.intervalMs} ms · ${esc(g.targetLabel)} · ${esc(g.endpointLabel)}` : 'fermo';
   if (!settingsDirty && document.activeElement !== $('interval') && document.activeElement !== $('pad')) {
     $('interval').value = g.settings.intervalMs; $('pad').value = g.settings.padBytes;
   }
@@ -375,7 +392,7 @@ function renderGenerator() {
     const cls = o.outcome === 'Ok' ? 'ok' : o.outcome === 'OkDopoRetry' ? 'warn' : o.outcome === 'InCorso' ? '' : 'err';
     const label = { Ok: '200', OkDopoRetry: '200 dopo retry', Rifiutata: String(o.finalStatus), Abbandonata: 'abbandonata', InCorso: 'in corso' }[o.outcome];
     return `<tr><td class="num">${o.seq}</td><td class="mono">${fmtTime(o.startedAt)}</td><td class="mono" title="${o.requestId}">${o.id}</td>
-      <td class="st ${cls}" title="${esc(o.error)}">${label}${o.replay ? ' ↺' : ''}</td><td class="mono">${esc(o.path)}</td><td class="num">${n(o.latencyMs)}</td></tr>`;
+      <td>${esc(o.endpoint || '—')}</td><td class="st ${cls}" title="${esc(o.error)}">${label}${o.replay ? ' ↺' : ''}</td><td class="mono">${esc(o.path)}</td><td class="num">${n(o.latencyMs)}</td></tr>`;
   }).join('');
   drawChart(g.series);
 }
@@ -449,12 +466,14 @@ $('verify').onclick = async () => {
         <dt>Voci applicate della sessione</dt><dd>${n(r.run.appliedForRun)} (seq distinti ${n(r.run.distinctSeqApplied)})</dd>
         <dt>applied.log</dt><dd>${n(r.totals.rows)} righe · ${n(r.totals.applied)} applicate · ${n(r.totals.duplicateDedup)} deduplicate · ${n(r.totals.noOp)} no-op · ultimo indice ${n(r.totals.lastLogIndex)}</dd>
         <dt>Altri esiti</dt><dd>${n(r.totals.conflict)} conflitti · ${n(r.totals.rejected)} rifiutate · ${n(r.totals.expired)} scadute · ${n(r.totals.quarantined)} in quarantena</dd>
+        <dt>Applicate per endpoint</dt><dd>${Object.entries(r.totals.byEndpoint).map(([k, v]) => `${esc(k)} ${n(v)}`).join(' · ') || '—'}</dd>
         <dt>Indici non consecutivi</dt><dd>${n(r.totals.indexGaps)}</dd>
         <dt>Abbandonate e non scritte</dt><dd>${n(r.failedNotWritten)}</dd>
       </dl>
       ${list('Seq scritti più volte (violazione)', r.duplicateSeq, d => `<li>seq ${d.seq}: indici ${d.logIndexes.join(', ')}</li>`)}
       ${list('RequestId applicati più volte (violazione)', r.duplicateRequestIds, d => `<li>${esc(d.requestId)}: indici ${d.logIndexes.join(', ')}</li>`)}
       ${list('Confermate con 200 ma assenti (violazione)', r.ackedMissing, d => `<li>seq ${d.seq} · ${esc(d.requestId)} · ${esc(d.path)}</li>`)}
+      ${list('Scritte con un endpoint diverso da quello di invio (violazione)', r.wrongEndpoint, d => `<li>seq ${d.seq} · inviata a ${esc(d.sentTo)} · scritta come ${esc(d.writtenAs)}</li>`)}
       ${list('Abbandonate dal client ma scritte (ammesso: REQ-API-3)', r.failedButWritten, d => `<li>seq ${d.seq} · ${esc(d.error)}</li>`)}
       <p class="muted">Nodi: ${r.nodes.map(x => `${esc(x.shortId)} ${esc(x.role)} commit ${n(x.commitIndex)} / applied ${n(x.lastApplied)}`).join(' · ')}</p>`;
   } catch { } finally { $('verify').disabled = false; }
@@ -480,7 +499,7 @@ async function refresh() {
   try {
     const r = await fetch('/sim/state'); state = await r.json();
     $('connChip').className = 'chip ok'; $('connChip').textContent = '● simulatore connesso';
-    renderHeader(); renderTargets(); renderNodes(); renderGenerator(); renderScenarios(); renderEvents();
+    renderHeader(); renderTargets(); renderEndpoints(); renderNodes(); renderGenerator(); renderScenarios(); renderEvents();
   } catch {
     $('connChip').className = 'chip err'; $('connChip').textContent = '● simulatore non raggiungibile';
   } finally { busy = false; }

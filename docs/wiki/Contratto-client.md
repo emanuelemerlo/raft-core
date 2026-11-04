@@ -3,15 +3,17 @@
 ## Richiesta
 
 ```http
-POST /api/v1/data
+POST <path dell'endpoint>            (es. /api/v1/misure, vedi Configurazione → Endpoints)
 X-Request-ID: <UUID generato UNA volta per operazione logica>
 Content-Type: application/json
 
-{ ...oggetto JSON... }
+{ ...JSON del tipo previsto dall'endpoint... }
 ```
 
 - Il client può chiamare **qualsiasi** nodo; non deve sapere chi è il Leader.
-- `X-Request-ID` è obbligatorio e identifica l'operazione: **ogni ritento deve riusare lo stesso ID e lo stesso body, byte per byte**. Anche una spaziatura JSON diversa produce 422, perché l'idempotenza confronta l'hash SHA-256 dei byte grezzi.
+- Ogni endpoint riceve un tipo di dato diverso. Codici di risposta, idempotenza e strategia di retry sono identici per tutti.
+- `X-Request-ID` è obbligatorio e identifica l'operazione: **ogni ritento deve riusare lo stesso ID, lo stesso endpoint e lo stesso body, byte per byte**. L'idempotenza confronta l'hash SHA-256 del nome dell'endpoint e dei byte grezzi del body: anche una spaziatura JSON diversa produce 422.
+- L'ID è unico per **tutto il cluster**, non per endpoint: riusarlo su un altro endpoint, anche con lo stesso body, produce 422 e non scrive nulla.
 
 ## Risposte
 
@@ -19,9 +21,10 @@ Content-Type: application/json
 | --- | --- | --- |
 | 200 | Scritto (o già scritto: header `X-Idempotent-Replay: true`) | considerare l'operazione completata |
 | 400 | `X-Request-ID` mancante o non UUID, JSON non valido | correggere la richiesta |
+| 404 | Path che non corrisponde a nessun endpoint configurato | correggere l'URL |
 | 410 | La richiesta è rimasta in sospeso oltre `MaxPendingAgeMinutes` e **non** è stata scritta | rigenerare l'operazione con un **nuovo** ID, se è ancora valida |
 | 413 | Body oltre `MaxBodyBytes` | ridurre il body |
-| 422 | ID riusato con un body diverso, oppure dato rifiutato dal database (`rejected`), oppure messo in quarantena (`quarantined`) | non ritentare; vedere `error`/`reason` nel body |
+| 422 | ID riusato con un body diverso o su un altro endpoint, oppure dato rifiutato dal database (`rejected`), oppure messo in quarantena (`quarantined`) | non ritentare; vedere `error`/`reason` nel body |
 | 503 | Nessun Leader con quorum entro il deadline, oppure sovraccarico (`Retry-After`) | ritentare con lo stesso ID |
 | 504 | Inoltrata, esito non osservato entro il deadline | ritentare con lo stesso ID |
 
@@ -30,6 +33,7 @@ Content-Type: application/json
 ## Strategia di retry consigliata
 
 - Ritentare su errore di rete, timeout, 503 e 504; non ritentare sui 4xx.
+- Ritentare sempre sullo **stesso endpoint**: cambia solo il nodo.
 - Backoff esponenziale con jitter (es. 200 ms, 400 ms, 800 ms… fino a 5 s), passando a un altro nodo se la connessione fallisce.
 - Timeout del client almeno `RequestDeadlineMs` + 5 s (default 15 s).
 - **Smettere di ritentare prima di `MaxPendingAgeMinutes`** (default 24 h). Oltre quella soglia l'esito di una voce mai completata è 410.
@@ -37,6 +41,7 @@ Content-Type: application/json
 ## Esempio C#
 
 ```csharp
+const string path = "/api/v1/misure";                // endpoint del tipo di dato
 var id = Guid.NewGuid().ToString();                  // una volta per operazione
 var body = JsonSerializer.SerializeToUtf8Bytes(dato); // serializzato UNA volta
 foreach (var delay in new[] { 0, 200, 400, 800, 1600, 3200, 5000 })
@@ -45,7 +50,7 @@ foreach (var delay in new[] { 0, 200, 400, 800, 1600, 3200, 5000 })
     var node = nodes[Random.Shared.Next(nodes.Length)];
     try
     {
-        using var req = new HttpRequestMessage(HttpMethod.Post, $"{node}/api/v1/data") { Content = new ByteArrayContent(body) };
+        using var req = new HttpRequestMessage(HttpMethod.Post, node + path) { Content = new ByteArrayContent(body) };
         req.Headers.Add("X-Request-ID", id);
         req.Content.Headers.ContentType = new("application/json");
         using var res = await http.SendAsync(req);

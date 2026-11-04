@@ -64,7 +64,7 @@ public sealed class DevClusterLauncherTests : IDisposable
         }
         lock (_log) _out.WriteLine(_log.ToString());
         Assert.Equal(3, live.Count);
-        using (var req = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{live[2]}/api/v1/data") { Content = new StringContent("{\"f5\":1}", Encoding.UTF8, "application/json") })
+        using (var req = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{live[2]}/api/v1/misure") { Content = new StringContent("{\"f5\":1}", Encoding.UTF8, "application/json") })
         {
             req.Headers.Add("X-Request-ID", Guid.NewGuid().ToString());
             using var r = await _http.SendAsync(req);

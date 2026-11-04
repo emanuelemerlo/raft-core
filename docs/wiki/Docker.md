@@ -4,9 +4,9 @@
 
 ```bash
 docker compose -f deploy/docker/docker-compose.yml up --build -d
-curl -X POST localhost:5001/api/v1/data -H "X-Request-ID: $(uuidgen)" -H "Content-Type: application/json" -d '{"a":1}'
+curl -X POST localhost:5001/api/v1/misure -H "X-Request-ID: $(uuidgen)" -H "Content-Type: application/json" -d '{"a":1}'
 docker compose -f deploy/docker/docker-compose.yml kill node1      # crash del nodo 1
-curl -X POST localhost:5002/api/v1/data -H "X-Request-ID: $(uuidgen)" -H "Content-Type: application/json" -d '{"a":2}'
+curl -X POST localhost:5002/api/v1/eventi -H "X-Request-ID: $(uuidgen)" -H "Content-Type: application/json" -d '{"a":2}'
 docker compose -f deploy/docker/docker-compose.yml start node1     # rientra e si riallinea
 ```
 

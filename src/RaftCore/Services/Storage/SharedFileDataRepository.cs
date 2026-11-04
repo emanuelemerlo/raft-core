@@ -11,7 +11,8 @@ namespace RaftCore.Services.Storage;
 /// State machine condivisa su file, per sviluppo e test sulla stessa macchina (o su una share locale).
 /// Emula la semantica del database condiviso: un lock tra processi fa da transazione, ogni riga di applied.log
 /// è il punto di commit di una voce (LogIndex, esito, payload) e LastApplied è l'indice dell'ultima riga.
-/// Formato riga: LogIndex \t Status \t RequestId \t PayloadHash \t HttpStatus \t Base64(risposta) \t Base64(payload)
+/// Formato riga (v0.3): LogIndex \t Status \t RequestId \t PayloadType \t PayloadHash \t HttpStatus \t Base64(risposta) \t Base64(payload)
+/// Il writer emulato è quello JSON di default per ogni endpoint configurato; una voce di un altro endpoint è Rejected (REQ-EPT-4).
 /// NON adatto alla produzione: l'indice delle richieste è in memoria.
 /// </summary>
 public sealed class SharedFileDataRepository : IDataRepository
@@ -21,6 +22,7 @@ public sealed class SharedFileDataRepository : IDataRepository
     private readonly string _dir, _file, _lock;
     private readonly int _lockTimeoutMs;
     private readonly bool _fsync;
+    private readonly HashSet<string> _payloadTypes;
     private readonly SemaphoreSlim _local = new(1, 1);
     private readonly Dictionary<string, Rec> _byRequest = new();
     private readonly Dictionary<long, ApplyOutcome> _byIndex = new();
@@ -29,8 +31,10 @@ public sealed class SharedFileDataRepository : IDataRepository
     /// <summary>Solo test: eccezione da sollevare per una voce (simula errori transitori o poison).</summary>
     public Func<LogEntry, Exception?>? FaultInjector { get; set; }
 
-    public SharedFileDataRepository(SharedFileConfig cfg, bool fsync)
+    /// <param name="payloadTypes">Nomi degli endpoint configurati (EndpointConfig.Name).</param>
+    public SharedFileDataRepository(SharedFileConfig cfg, bool fsync, IEnumerable<string> payloadTypes)
     {
+        _payloadTypes = new HashSet<string>(payloadTypes, StringComparer.Ordinal);
         _dir = Path.GetFullPath(cfg.Directory);
         _file = Path.Combine(_dir, "applied.log");
         _lock = Path.Combine(_dir, "applied.lock");
@@ -88,6 +92,8 @@ public sealed class SharedFileDataRepository : IDataRepository
         }
         if (ctx.MaxPendingAge > TimeSpan.Zero && ctx.NowUtc - e.ReceivedUtc > ctx.MaxPendingAge)
             return (Outcomes.Expired(e.Index, e.RequestId, e.ReceivedUtc), false);
+        if (!_payloadTypes.Contains(e.PayloadType))
+            return (Outcomes.Rejected(e.Index, e.RequestId, Outcomes.UnknownPayloadType(e.PayloadType)), false);
         if (!IsJsonObject(e.Payload))
             return (Outcomes.Rejected(e.Index, e.RequestId, "il payload deve essere un oggetto JSON"), false);
         return (Outcomes.Applied(e.Index, e.RequestId), true);
@@ -105,7 +111,7 @@ public sealed class SharedFileDataRepository : IDataRepository
     // ------------------------------------------------------------------ file
     private void AppendLine(LogEntry e, ApplyOutcome o, byte[] payload)
     {
-        var line = $"{e.Index}\t{(int)o.Status}\t{e.RequestId}\t{e.PayloadHash}\t{o.HttpStatus}\t{Convert.ToBase64String(o.Body)}\t{Convert.ToBase64String(payload)}\n";
+        var line = $"{e.Index}\t{(int)o.Status}\t{e.RequestId}\t{e.PayloadType}\t{e.PayloadHash}\t{o.HttpStatus}\t{Convert.ToBase64String(o.Body)}\t{Convert.ToBase64String(payload)}\n";
         var bytes = Encoding.ASCII.GetBytes(line);
         using (var fs = new FileStream(_file, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
         {
@@ -145,10 +151,11 @@ public sealed class SharedFileDataRepository : IDataRepository
         foreach (var line in Encoding.ASCII.GetString(buf, 0, lastNl).Split('\n'))
         {
             var f = line.Split('\t');
-            if (f.Length < 7 || !long.TryParse(f[0], out var idx) || !int.TryParse(f[1], out var st) || !int.TryParse(f[4], out var http))
-                throw new InvalidDataException($"applied.log: riga non valida: {line}");
+            if (f.Length != 8 || !long.TryParse(f[0], out var idx) || !int.TryParse(f[1], out var st) || !int.TryParse(f[5], out var http))
+                throw new InvalidDataException($"applied.log: riga non valida o scritta da una versione precedente (attesi 8 campi): {line}. " +
+                    $"Con un file della v0.2 svuotare {_dir}.");
             var status = (ApplyStatus)st;
-            Index(idx, status, f[2], f[3], new ApplyOutcome(status, http, Convert.FromBase64String(f[5]), idx));
+            Index(idx, status, f[2], f[4], new ApplyOutcome(status, http, Convert.FromBase64String(f[6]), idx));
         }
         _offset += lastNl + 1;
     }

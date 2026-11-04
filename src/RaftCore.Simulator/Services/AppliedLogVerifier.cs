@@ -5,14 +5,15 @@ namespace RaftCore.Simulator.Services;
 
 /// <summary>
 /// Confronta ciò che il simulatore ha inviato con ciò che il cluster ha scritto nella state machine SharedFile
-/// (applied.log): nessun duplicato, nessuna operazione confermata con 200 e poi mancante.
-/// Formato riga: LogIndex \t Status \t RequestId \t PayloadHash \t HttpStatus \t Base64(risposta) \t Base64(payload)
+/// (applied.log): nessun duplicato, nessuna operazione confermata con 200 e poi mancante, nessuna scrittura registrata
+/// con un endpoint diverso da quello a cui l'operazione è stata inviata.
+/// Formato riga: LogIndex \t Status \t RequestId \t PayloadType \t PayloadHash \t HttpStatus \t Base64(risposta) \t Base64(payload)
 /// </summary>
 public sealed class AppliedLogVerifier
 {
     private const int Applied = 1, Duplicate = 2, Conflict = 3, Rejected = 4, Expired = 5, Quarantined = 6, NoOp = 7;
 
-    private sealed record Row(long Index, int Status, string RequestId, long? Seq, string? RunId);
+    private sealed record Row(long Index, int Status, string RequestId, string PayloadType, long? Seq, string? RunId);
 
     public string FilePath { get; }
 
@@ -31,13 +32,13 @@ public sealed class AppliedLogVerifier
         foreach (var line in text[..last].Split('\n'))
         {
             var f = line.Split('\t');
-            if (f.Length < 7 || !long.TryParse(f[0], out var idx) || !int.TryParse(f[1], out var st)) continue;
+            if (f.Length != 8 || !long.TryParse(f[0], out var idx) || !int.TryParse(f[1], out var st)) continue;
             long? seq = null; string? runId = null;
-            if (st == Applied && f[6].Length > 0)
+            if (st == Applied && f[7].Length > 0)
             {
                 try
                 {
-                    using var doc = JsonDocument.Parse(Convert.FromBase64String(f[6]));
+                    using var doc = JsonDocument.Parse(Convert.FromBase64String(f[7]));
                     var r = doc.RootElement;
                     if (r.ValueKind == JsonValueKind.Object)
                     {
@@ -47,7 +48,7 @@ public sealed class AppliedLogVerifier
                 }
                 catch (Exception) { }
             }
-            rows.Add(new Row(idx, st, f[2], seq, runId));
+            rows.Add(new Row(idx, st, f[2], f[3], seq, runId));
         }
         return rows;
     }
@@ -68,8 +69,8 @@ public sealed class AppliedLogVerifier
             {
                 available = false,
                 path = FilePath,
-                message = "applied.log non trovato. Con la state machine SQL Server la verifica si fa sul database, ad esempio: " +
-                          "SELECT RequestId, COUNT(*) FROM raft.IngestedData GROUP BY RequestId HAVING COUNT(*) > 1",
+                message = "applied.log non trovato. Con la state machine SQL Server la verifica si fa sul database, per ogni tabella di endpoint, ad esempio: " +
+                          "SELECT RequestId, COUNT(*) FROM dbo.Misure GROUP BY RequestId HAVING COUNT(*) > 1",
                 nodes
             };
 
@@ -87,7 +88,10 @@ public sealed class AppliedLogVerifier
         var failedButWritten = ops.Where(o => o.Outcome is OpOutcome.Abbandonata && bySeq.ContainsKey(o.Seq))
             .Select(o => new { o.Seq, o.RequestId, o.Error }).Take(50).ToList();
         var failedNotWritten = ops.Count(o => o.Outcome is OpOutcome.Abbandonata && !bySeq.ContainsKey(o.Seq));
-        bool passed = duplicateSeq.Count == 0 && duplicateRequestIds.Count == 0 && ackedMissing.Count == 0;
+        var wrongEndpoint = ops.Where(o => o.Endpoint.Length > 0 && bySeq.TryGetValue(o.Seq, out var w) && w.Any(r => r.PayloadType != o.Endpoint))
+            .Select(o => new { o.Seq, o.RequestId, sentTo = o.Endpoint, writtenAs = string.Join(", ", bySeq[o.Seq].Select(r => r.PayloadType).Distinct()) })
+            .Take(50).ToList();
+        bool passed = duplicateSeq.Count == 0 && duplicateRequestIds.Count == 0 && ackedMissing.Count == 0 && wrongEndpoint.Count == 0;
 
         // indici del log consecutivi: ogni voce committed è stata registrata una volta e in ordine
         var indexes = rows.Select(r => r.Index).ToList();
@@ -113,7 +117,9 @@ public sealed class AppliedLogVerifier
                 quarantined = rows.Count(r => r.Status == Quarantined),
                 noOp = rows.Count(r => r.Status == NoOp),
                 lastLogIndex = indexes.Count == 0 ? 0 : indexes[^1],
-                indexGaps = gaps
+                indexGaps = gaps,
+                byEndpoint = rows.Where(r => r.Status == Applied).GroupBy(r => r.PayloadType).OrderBy(g => g.Key)
+                    .ToDictionary(g => g.Key.Length == 0 ? "(nessuno)" : g.Key, g => g.Count())
             },
             run = new
             {
@@ -130,6 +136,7 @@ public sealed class AppliedLogVerifier
             ackedMissing,
             failedButWritten,
             failedNotWritten,
+            wrongEndpoint,
             nodes
         };
     }
