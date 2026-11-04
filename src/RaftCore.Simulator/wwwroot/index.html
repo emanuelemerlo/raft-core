@@ -112,6 +112,13 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .verify-out dt { color: var(--muted); } .verify-out dd { margin: 0; font-family: var(--mono); }
 .toast { position: fixed; right: 18px; bottom: 18px; max-width: 420px; background: var(--text); color: var(--bg); padding: 10px 14px; border-radius: 8px; font-size: 13px; opacity: 0; transform: translateY(8px); transition: .2s; pointer-events: none; z-index: 10; }
 .toast.show { opacity: 1; transform: none; }
+/* endpoint */
+.eps td input[type=number] { width: 58px; }
+.eps tr.off td { color: var(--muted); }
+.eps .tpl td { background: var(--panel-2); }
+.eps textarea { width: 100%; min-height: 110px; font-family: var(--mono); font-size: 12px; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px; box-sizing: border-box; }
+.eps pre { margin: 6px 0 0; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-all; color: var(--muted); }
+.res-ep + .res-ep { margin-top: 6px; }
 .hint { font-size: 12.5px; color: var(--muted); margin: 8px 0 0; }
 code { font-family: var(--mono); font-size: 12px; background: var(--panel-2); padding: 1px 4px; border-radius: 4px; }
 @media (max-width: 640px) { header, main { padding-left: 16px; padding-right: 16px; } }
@@ -156,9 +163,6 @@ code { font-family: var(--mono); font-size: 12px; background: var(--panel-2); pa
           <label class="field">Destinazione
             <select id="target"></select>
           </label>
-          <label class="field">Endpoint
-            <select id="endpoint"></select>
-          </label>
           <label class="field">Riempimento (byte)
             <input type="number" id="pad" min="0" step="1024" value="0">
           </label>
@@ -171,11 +175,20 @@ code { font-family: var(--mono); font-size: 12px; background: var(--panel-2); pa
             <button id="burst">Invia raffica</button>
           </span>
         </div>
-        <p class="hint">Ogni messaggio è <code>{"seq": n, "timestamp": "…", "source": "simulatore", "runId": "…"}</code>. Il client segue il contratto: stesso <code>X-Request-ID</code> e stessi byte a ogni ritento, retry su errore di rete, 503 e 504 con backoff e jitter, mai su 4xx.</p>
+        <p class="hint">Ogni operazione va a un endpoint scelto in proporzione ai pesi e invia il JSON del suo modello, più <code>seq</code>, <code>timestamp</code>, <code>source</code> e <code>runId</code>. Il client segue il contratto: stesso endpoint, stesso <code>X-Request-ID</code> e stessi byte a ogni ritento, retry su errore di rete, 503 e 504 con backoff e jitter, mai su 4xx.</p>
+
+        <div class="panel-h" style="margin-top:12px"><h2 style="font-size:14px">Endpoint</h2><span class="spacer"></span><span class="muted" style="font-size:12px">peso 0 = escluso</span></div>
+        <div class="scroll" style="max-height:none">
+          <table class="eps">
+            <thead><tr><th>Endpoint</th><th class="num">Peso</th><th class="num">Quota</th><th class="num">200</th><th class="num">dopo retry</th><th class="num">4xx</th><th class="num">abbandonate</th><th class="num">ritenti</th><th class="num">p50</th><th class="num">p95</th><th></th></tr></thead>
+            <tbody id="eps"></tbody>
+          </table>
+        </div>
 
         <div class="tiles" id="tiles"></div>
 
         <div class="chart-wrap">
+          <div class="row" style="margin:0 0 6px"><label class="field">Grafico <select id="chartScope"></select></label></div>
           <canvas id="chart"></canvas>
           <div class="legend">
             <span><i style="background:var(--c-ok)"></i>200</span>
@@ -216,7 +229,9 @@ code { font-family: var(--mono); font-size: 12px; background: var(--panel-2); pa
 
     <div>
       <section class="panel">
-        <div class="panel-h"><h2>Scenari</h2><span class="spacer"></span><button class="small" id="runAll">Esegui tutti</button></div>
+        <div class="panel-h"><h2>Scenari</h2><span class="spacer"></span>
+          <label class="field" style="flex-direction:row;align-items:center;gap:6px">Endpoint <select id="scenEp"></select></label>
+          <button class="small" id="runAll">Esegui tutti</button></div>
         <div id="scenarios"></div>
       </section>
 
@@ -332,25 +347,86 @@ function renderTargets() {
   if (sel.value !== current) { ensureTargetOption(current); sel.value = current; }
 }
 
+// ---------------------------------------------------------------- endpoint: pesi, statistiche, modelli del payload
+let openTemplate = null, weightsDirty = false;
 function renderEndpoints() {
-  const sel = $('endpoint'), current = sel.dataset.sig ? sel.value : state.generator.settings.endpoint;
-  const opts = [['', 'tutti a rotazione']].concat(state.endpoints.map(e => [e.name, `${e.name} · ${e.path}`]));
-  if (current && !opts.some(o => o[0] === current)) opts.push([current, `${current} · non esposto`]);
-  const sig = opts.map(o => o.join('=')).join('|');
-  if (sel.dataset.sig !== sig) {
-    sel.innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join('');
-    sel.dataset.sig = sig;
+  const g = state.generator, body = $('eps');
+  const rows = g.byEndpoint;
+  // la tabella si ricostruisce solo se cambia l'insieme degli endpoint: così pesi ed editor non perdono il fuoco
+  const sig = rows.map(r => r.name + (r.exposed ? '' : '!')).join('|') + '#' + openTemplate;
+  if (body.dataset.sig !== sig) {
+    body.innerHTML = rows.length ? rows.map(r => `
+      <tr data-ep="${esc(r.name)}"><td><b>${esc(r.name)}</b><div class="mono muted" style="font-size:11.5px">${esc(r.path ?? 'non più esposto')}</div></td>
+        <td class="num"><input type="number" min="0" max="100" step="1" data-w="${esc(r.name)}" ${r.exposed ? '' : 'disabled'}></td>
+        <td class="num" data-c="share"></td><td class="num" data-c="ok"></td><td class="num" data-c="okAfterRetry"></td><td class="num" data-c="rejected"></td>
+        <td class="num" data-c="gaveUp"></td><td class="num" data-c="retries"></td><td class="num" data-c="p50"></td><td class="num" data-c="p95"></td>
+        <td>${r.exposed ? `<button class="small" data-tpl="${esc(r.name)}">${openTemplate === r.name ? 'Chiudi' : 'Modello'}</button>` : ''}</td></tr>
+      ${openTemplate === r.name ? `<tr class="tpl"><td colspan="11">
+        <textarea id="tplText" spellcheck="false">${esc(g.payloadTemplates[r.name] ?? '{}')}</textarea>
+        <div class="row" style="margin-top:6px"><button class="small primary" data-tpl-save="${esc(r.name)}">Salva</button>
+          <button class="small" data-tpl-preview="${esc(r.name)}">Anteprima</button>
+          <span class="muted" style="font-size:12px">Segnaposto: {seq} {now} {uuid} {random} {randomInt} {choice:a|b|c}</span></div>
+        <pre id="tplPreview"></pre></td></tr>` : ''}`).join('')
+      : '<tr><td colspan="11" class="muted">Endpoint non ancora noti: in attesa dello stato dei nodi</td></tr>';
+    body.dataset.sig = sig;
+    weightsDirty = false;
   }
-  sel.value = current ?? '';
+  for (const r of rows) {
+    const tr = body.querySelector(`tr[data-ep="${CSS.escape(r.name)}"]`); if (!tr) continue;
+    tr.className = r.exposed && r.weight > 0 ? '' : 'off';
+    const w = tr.querySelector('input[data-w]');
+    if (w && !weightsDirty && document.activeElement !== w) w.value = r.weight;
+    const c = r.counters, set = (k, v) => tr.querySelector(`[data-c="${k}"]`).textContent = v;
+    set('share', r.exposed ? r.share + ' %' : '—'); set('ok', n(c.ok)); set('okAfterRetry', n(c.okAfterRetry)); set('rejected', n(c.rejected));
+    set('gaveUp', n(c.gaveUp)); set('retries', n(c.retries)); set('p50', n(r.latency.p50)); set('p95', n(r.latency.p95));
+  }
+  renderScopes();
 }
+function readWeights() {
+  const w = { ...(state?.generator?.settings?.endpointWeights ?? {}) };   // pesi di endpoint non visibili ora: conservati
+  document.querySelectorAll('#eps input[data-w]').forEach(i => { if (!i.disabled) w[i.dataset.w] = Math.max(0, Math.min(100, Number(i.value) || 0)); });
+  return w;
+}
+$('eps').addEventListener('input', e => { if (e.target.matches('input[data-w]')) { weightsDirty = true; settingsDirty = true; } });
+$('eps').addEventListener('change', e => { if (e.target.matches('input[data-w]')) pushSettings().then(() => weightsDirty = false); });
+$('eps').addEventListener('click', async e => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.tpl) { openTemplate = openTemplate === b.dataset.tpl ? null : b.dataset.tpl; renderEndpoints(); return; }
+  if (b.dataset.tplSave) {
+    const r = await fetch(`/sim/payloads/${encodeURIComponent(b.dataset.tplSave)}`, { method: 'PUT', body: $('tplText').value });
+    if (!r.ok) { let m = `Errore ${r.status}`; try { m = (await r.json()).error ?? m; } catch { } toast(m); return; }
+    toast(`Modello di ${b.dataset.tplSave} salvato`); openTemplate = null; await refresh(); return;
+  }
+  if (b.dataset.tplPreview) {
+    // l'anteprima riflette il modello salvato: si salva prima, così l'errore di sintassi compare subito
+    const r = await fetch(`/sim/payloads/${encodeURIComponent(b.dataset.tplPreview)}`, { method: 'PUT', body: $('tplText').value });
+    if (!r.ok) { let m = `Errore ${r.status}`; try { m = (await r.json()).error ?? m; } catch { } $('tplPreview').textContent = m; return; }
+    const p = await fetch(`/sim/payloads/${encodeURIComponent(b.dataset.tplPreview)}/preview`, { method: 'POST' });
+    try { $('tplPreview').textContent = JSON.stringify(JSON.parse(await p.text()), null, 2); } catch { $('tplPreview').textContent = 'anteprima non disponibile'; }
+  }
+});
+
+// selettori di ambito: grafico (totale o un endpoint) e scenari (un endpoint o tutti)
+function renderScopes() {
+  const names = state.generator.byEndpoint.filter(r => r.exposed).map(r => r.name);
+  const fill = (sel, opts, fallback) => {
+    const sig = opts.map(o => o.join('=')).join('|');
+    const cur = sel.value;
+    if (sel.dataset.sig !== sig) { sel.innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join(''); sel.dataset.sig = sig; }
+    sel.value = opts.some(o => o[0] === cur) ? cur : fallback;
+  };
+  fill($('chartScope'), [['', 'tutti gli endpoint']].concat(names.map(x => [x, x])), '');
+  fill($('scenEp'), names.map(x => [x, x]).concat(names.length > 1 ? [['*', 'tutti']] : []), names[0] ?? '');
+}
+$('chartScope').addEventListener('change', () => renderGenerator());
 
 function readSettings() {
   return { intervalMs: Number($('interval').value) || 200, target: $('target').value || 'RoundRobin', padBytes: Number($('pad').value) || 0,
-    endpoint: $('endpoint').value || '' };
+    endpointWeights: readWeights() };
 }
 async function pushSettings() { await call('/sim/generator/settings', readSettings()).catch(() => { }); settingsDirty = false; }
 ['interval', 'pad'].forEach(id => $(id).addEventListener('input', () => settingsDirty = true));
-['interval', 'pad', 'target', 'endpoint'].forEach(id => $(id).addEventListener('change', pushSettings));
+['interval', 'pad', 'target'].forEach(id => $(id).addEventListener('change', pushSettings));
 
 $('startStop').onclick = async () => {
   if (state.generator.running) await call('/sim/generator/stop');
@@ -360,7 +436,7 @@ $('startStop').onclick = async () => {
 $('sendOne').onclick = async () => {
   await pushSettings();
   const r = await call('/sim/generator/one').catch(() => null);
-  if (r) toast(`#${r.seq}: ${r.outcome} (${r.finalStatus || 'rete'}) in ${r.latencyMs} ms · ${r.path}`);
+  if (r) toast(`#${r.seq}${r.endpoint ? ' · ' + r.endpoint : ''}: ${r.outcome} (${r.finalStatus || 'rete'}) in ${r.latencyMs} ms · ${r.path}`);
   refresh();
 };
 $('burst').onclick = async () => { await pushSettings(); await call(`/sim/generator/burst?count=${$('burstN').value}`).catch(() => { }); };
@@ -394,7 +470,8 @@ function renderGenerator() {
     return `<tr><td class="num">${o.seq}</td><td class="mono">${fmtTime(o.startedAt)}</td><td class="mono" title="${o.requestId}">${o.id}</td>
       <td>${esc(o.endpoint || '—')}</td><td class="st ${cls}" title="${esc(o.error)}">${label}${o.replay ? ' ↺' : ''}</td><td class="mono">${esc(o.path)}</td><td class="num">${n(o.latencyMs)}</td></tr>`;
   }).join('');
-  drawChart(g.series);
+  const scope = $('chartScope').value, ep = scope && g.byEndpoint.find(r => r.name === scope);
+  drawChart(ep ? ep.series : g.series);
 }
 
 function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
@@ -436,17 +513,28 @@ function renderScenarios() {
       <div class="res" hidden></div></div>`).join('');
     el.dataset.ready = '1';
   }
-  for (const r of [...state.scenarioHistory].reverse()) if (!scenarioResults[r.id] || scenarioResults[r.id].at < r.at) scenarioResults[r.id] = r;
-  for (const [id, r] of Object.entries(scenarioResults)) {
-    const box = document.querySelector(`#scen-${id} .res`); if (!box) continue;
-    box.hidden = false; box.className = 'res ' + (r.passed ? 'pass' : 'fail');
-    box.innerHTML = `<span class="verdict">${r.passed ? '✓ superato' : '✕ non superato'}</span> · ${esc(r.summary)} <span class="muted">(${fmtTime(r.at)})</span>
-      <ol class="steps">${r.steps.map(s => `<li>${esc(s.label)} → porta ${s.port}: <span class="st ${statusClass(s.status)}">${s.status || 'rete'}</span>${s.replay ? ' replay' : ''} · ${s.ms} ms${s.note ? ' · ' + esc(String(s.note).slice(0, 120)) : ''}</li>`).join('')}</ol>`;
+  // ultimo esito per (scenario, endpoint)
+  for (const r of [...state.scenarioHistory].reverse()) {
+    const k = r.id + '|' + (r.endpoint ?? ''), old = scenarioResults[k];
+    if (!old || old.at < r.at) scenarioResults[k] = r;
+  }
+  for (const s of state.scenarios) {
+    const box = document.querySelector(`#scen-${s.id} .res`); if (!box) continue;
+    const list = Object.values(scenarioResults).filter(r => r.id === s.id).sort((a, b) => (a.endpoint ?? '').localeCompare(b.endpoint ?? ''));
+    if (!list.length) continue;
+    box.hidden = false; box.className = 'res ' + (list.every(r => r.passed) ? 'pass' : 'fail');
+    box.innerHTML = list.map(r => `<div class="res-ep ${r.passed ? 'pass' : 'fail'}"><span class="verdict" style="color:var(--${r.passed ? 'ok' : 'err'});font-weight:650">${r.passed ? '✓' : '✕'}${r.endpoint ? ' ' + esc(r.endpoint) : ''}</span> · ${esc(r.summary)} <span class="muted">(${fmtTime(r.at)})</span>
+      <ol class="steps">${r.steps.map(st => `<li>${esc(st.label)} → porta ${st.port}: <span class="st ${statusClass(st.status)}">${st.status || 'rete'}</span>${st.replay ? ' replay' : ''} · ${st.ms} ms${st.note ? ' · ' + esc(String(st.note).slice(0, 120)) : ''}</li>`).join('')}</ol></div>`).join('');
   }
 }
 async function runScenario(id) {
   const btn = document.querySelector(`button[data-scen="${id}"]`); if (btn) { btn.disabled = true; btn.textContent = '…'; }
-  try { const r = await call(`/sim/scenarios/${id}`); scenarioResults[id] = r; renderScenarios(); }
+  const ep = $('scenEp').value;
+  try {
+    const rs = await call(`/sim/scenarios/${id}?endpoint=${encodeURIComponent(ep)}`);
+    for (const r of rs) scenarioResults[r.id + '|' + (r.endpoint ?? '')] = r;
+    renderScenarios();
+  }
   catch { } finally { if (btn) { btn.disabled = false; btn.textContent = 'Esegui'; } }
 }
 $('scenarios').addEventListener('click', e => { const b = e.target.closest('button[data-scen]'); if (b) runScenario(b.dataset.scen); });

@@ -18,7 +18,12 @@ Il workflow di release usa la sezione della versione come note di rilascio.
 - **Versione di protocollo** in ogni RPC e annuncio UDP: i nodi di versioni diverse si rifiutano a vicenda (metrica `rpcProtocolMismatch`).
 - **Impronta della configurazione degli endpoint** in ogni RPC: le differenze tra nodi sono segnalate (metrica `endpointsHashMismatch`, campo `endpointsMismatch` dello stato) senza bloccare il cluster.
 - Tabella `raft.SchemaVersion` e script `sql/002_endpoint_table.sql` per le tabelle degli endpoint.
-- Simulatore: scelta dell'endpoint (letto dallo stato dei nodi), scenari «stesso ID su due endpoint» e «path non configurato», verifica dell'endpoint di ogni scrittura.
+- Simulatore su N endpoint (letti dallo stato dei nodi):
+  - pesi per endpoint nell'invio ciclico (0 = escluso);
+  - modello JSON per endpoint con segnaposto, modificabile dall'interfaccia con anteprima (`Simulator:Payloads`);
+  - contatori, latenze e grafico per endpoint;
+  - scenari su un endpoint scelto o su tutti, con i body del modello dell'endpoint; nuovi scenari «stesso ID su un altro endpoint» e «path non configurato»;
+  - verifica dell'endpoint di ogni scrittura.
 - **Simulatore client** (`src/RaftCore.Simulator`): applicazione web di sviluppo su http://localhost:5100, avviabile con il cluster tramite il profilo multiplo **Cluster + Simulatore** (`RaftCore.slnLaunch`). Comprende:
   - stato dei nodi;
   - invio ciclico di JSON con `seq` progressivo e `timestamp`, con retry conforme al contratto client;

@@ -11,6 +11,7 @@ builder.Services.AddSingleton<PathResolver>();
 builder.Services.AddSingleton<EventLog>();
 builder.Services.AddSingleton<DataClient>();
 builder.Services.AddSingleton<ProcessControl>();
+builder.Services.AddSingleton<PayloadFactory>();
 builder.Services.AddSingleton<ClusterMonitor>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<ClusterMonitor>());
 builder.Services.AddSingleton<LoadGenerator>();
@@ -46,7 +47,7 @@ api.MapGet("/state", (ClusterMonitor m, LoadGenerator g, EventLog e, AppliedLogV
     events = e.Recent(120),
     appliedLog = new { path = v.FilePath, available = v.Available },
     scenarios = ScenarioRunner.All,
-    scenarioHistory = s.History().Take(20)
+    scenarioHistory = s.History()
 }));
 
 // ---- invio ciclico
@@ -62,8 +63,18 @@ api.MapPost("/generator/burst", (int? count, LoadGenerator g) => Results.Ok(new 
 api.MapPost("/generator/reset", (LoadGenerator g) => { g.ResetStats(); return Results.Ok(); });
 api.MapGet("/ops.csv", (LoadGenerator g) => Results.Text(g.OpsCsv(), "text/csv; charset=utf-8"));
 
-// ---- scenari
-api.MapPost("/scenarios/{id}", async (string id, ScenarioRunner s, CancellationToken ct) => Results.Json(await s.RunAsync(id, ct)));
+// ---- modelli dei payload per endpoint
+api.MapPut("/payloads/{endpoint}", async (string endpoint, HttpRequest req, PayloadFactory p) =>
+{
+    using var reader = new StreamReader(req.Body);
+    p.SetTemplate(endpoint, await reader.ReadToEndAsync());
+    return Results.Ok();
+});
+api.MapPost("/payloads/{endpoint}/preview", (string endpoint, PayloadFactory p, LoadGenerator g) =>
+    Results.Text(System.Text.Encoding.UTF8.GetString(p.Build(endpoint, 1, DateTimeOffset.Now, g.RunId)), "application/json"));
+
+// ---- scenari: ?endpoint=nome (vuoto = il primo esposto) oppure ?endpoint=* (tutti); restituisce un esito per endpoint
+api.MapPost("/scenarios/{id}", async (string id, string? endpoint, ScenarioRunner s, CancellationToken ct) => Results.Json(await s.RunAsync(id, endpoint, ct)));
 
 // ---- guasti sui processi dei nodi
 api.MapPost("/nodes/{nodeId}/kill", (string nodeId, ClusterMonitor m, LoadGenerator g) =>
